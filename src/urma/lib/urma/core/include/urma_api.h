@@ -807,6 +807,75 @@ urma_target_seg_t *urma_register_seg(urma_context_t *ctx, urma_seg_cfg_t *seg_cf
  */
 urma_status_t urma_unregister_seg(urma_target_seg_t *target_seg);
 
+/* =========================================================================
+ *
+ *  GDR (GPU Direct RDMA) framework -- new public API (skeleton).
+ *
+ *  这是什么 (What):
+ *    与 urma_register_seg() 平级的"显存注册"入口. 调用方传入一个由 GPU 用户
+ *    态运行时 (CUDA / ROCm / 第三方加速器) 导出的 dma-buf 文件描述符以及
+ *    在 dma-buf 内部的偏移, 内核 ubcore 就能用 dma_buf_attach() +
+ *    dma_buf_map_attachment() 直接拿到 sg_table 并把 NIC MAPT/MTT 写完, 而
+ *    不需要 pin_user_pages_fast() 这条仅适用于普通 CPU 内存的老路径.
+ *
+ *  这对你 (内核老兵) 意味着什么 (How):
+ *    - 用户态拿到 fd 之后, 这层 API 就和 ioctl(fd, ...) 之前的封装一样
+ *      "薄": 它只把 (fd, offset) 透传给 ubcore IOCTL, 真正的 dma-buf 协议
+ *      在内核里完成.
+ *    - 与 ibv_reg_dmabuf_mr() 一一对应: 同一个 GPU 内存可以同时挂在 RDMA
+ *      和 URMA 上, 因为 dma-buf 本就允许多个 attacher.
+ *
+ *  当前阶段 (Current state):
+ *    本头里只放函数声明, 实现见 urma_seg_dmabuf.c (stub: print + 返回 NULL/
+ *    URMA_ENOTSUPP). 真正的 ABI 字段扩展 (urma_seg_cfg / urma_reg_seg_flag /
+ *    urma_cmd_register_seg) 暂以注释形式列在 urma_types.h / urma_cmd.h.
+ *    详见 docs/urma_gdr_analysis.md.
+ *
+ *  注意 (Caveat):
+ *    1) 设备必须支持 dma-buf import. 调用前用 urma_query_dmabuf_caps() 探一下.
+ *    2) seg_cfg->va 在 dma-buf 路径下不再必须是 mmap 出来的用户 va; 你完全
+ *       可以传 0, 因为 NIC 看到的是 dma_addr_t. 但为了兼容现有 token 模型,
+ *       建议仍填写 mmap(NULL, size, PROT_*, MAP_SHARED, fd, offset) 的结果
+ *       (CUDA 设备指针不能被 CPU 访问, 那就传 0 + 一个对应的 user_iova).
+ *    3) seg_cfg->flag.bs.non_pin 与 dma-buf pinned 语义冲突, 请置 0.
+ * ========================================================================= */
+
+/* GDR capability descriptor returned by urma_query_dmabuf_caps. */
+typedef struct urma_dmabuf_caps {
+    uint8_t  support_dmabuf;        /* 1 = device can import dma-buf */
+    uint8_t  support_dynamic;       /* 1 = supports dma_buf_pin/unpin */
+    uint64_t max_seg_size;          /* upper bound of a single dmabuf seg */
+    uint32_t supported_alignments;  /* bitmap: 1<<12 (4K) | 1<<21 (2M) | 1<<30 (1G) */
+} urma_dmabuf_caps_t;
+
+/**
+ * Register a memory segment that is backed by a dma-buf fd (GPU/HBM/...).
+ * @param[in] ctx           urma context;
+ * @param[in] seg_cfg       same struct as urma_register_seg(); va/iova/access/token
+ *                          fields apply, flag.bs.non_pin must be 0;
+ * @param[in] dmabuf_fd     fd from cuMemGetHandleForAddressRange / hsa_amd_portable_export_dmabuf
+ *                          / a third-party accelerator. caller keeps ownership;
+ * @param[in] offset        offset within the dma-buf;
+ * Return: pointer to target segment on success, NULL on error (errno set).
+ */
+urma_target_seg_t *urma_register_seg_dmabuf(urma_context_t *ctx,
+                                            urma_seg_cfg_t *seg_cfg,
+                                            int dmabuf_fd,
+                                            uint64_t offset);
+
+/**
+ * Query whether the URMA device can import dma-buf and at what alignment.
+ * @param[in]  dev   urma device;
+ * @param[out] caps  filled by the call;
+ * Return: URMA_SUCCESS / URMA_EINVAL / URMA_FAIL.
+ *
+ * 注: URMA 错误码定义在 urma_opcode.h, 当前没有专门的 ENOTSUPP, 暂以
+ * URMA_FAIL 表示"驱动不支持 dma-buf"; 后续可考虑新增 URMA_ENOTSUPP 一项.
+ */
+urma_status_t urma_query_dmabuf_caps(urma_device_t *dev,
+                                     urma_dmabuf_caps_t *caps);
+/* === end of GDR skeleton API ===========================================*/
+
 /**
  * Import a memory segment on specified ubva address.
  * @param[in] [Required] ctx: the created urma context pointer;
