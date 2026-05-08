@@ -1,0 +1,246 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+ * Description: realize func for umq ub api
+ * Create: 2025-8-4
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#include "umq_vlog.h"
+#include "umq_errno.h"
+#include "umq_ub_impl.h"
+#include "umq_qbuf_pool.h"
+#include "umq_ub_api.h"
+#include "umq_symbol_private.h"
+
+static int umq_tp_ub_symbol_load(void)
+{
+    umq_symbol_urma_t *sym = umq_symbol_urma();
+    if (umq_symbol_urma_load(sym) != 0) {
+        UMQ_VLOG_ERR(VLOG_UMQ, "Failed to load urma/uvs symbols\n");
+        return -1;
+    }
+    return 0;
+}
+
+static uint8_t *umq_tp_ub_init(umq_init_cfg_t *cfg)
+{
+    uint8_t *ub_ctx = umq_ub_ctx_init_impl(cfg);
+    if (ub_ctx == NULL) {
+        UMQ_VLOG_ERR(VLOG_UMQ, "umq ub ctx init failed\n");
+        return NULL;
+    }
+
+    int ret = umq_ub_register_memory_impl(umq_io_buf_addr(), umq_io_buf_size());
+    if (ret != UMQ_SUCCESS) {
+        UMQ_VLOG_ERR(VLOG_UMQ, "register memory failed, status: %d\n", ret);
+        goto UNINIT;
+    }
+
+    return ub_ctx;
+
+UNINIT:
+    umq_ub_ctx_uninit_impl(ub_ctx);
+    return NULL;
+}
+
+static void umq_tp_ub_uninit(uint8_t *ctx)
+{
+    if (ctx == NULL) {
+        UMQ_VLOG_ERR(VLOG_UMQ, "ub_ctx is null\n");
+        return;
+    }
+    umq_ub_unregister_memory_impl();
+    umq_ub_ctx_uninit_impl(ctx);
+}
+
+static uint64_t umq_tp_ub_create(uint64_t umqh __attribute__((unused)), uint8_t *ctx, umq_create_option_t *option)
+{
+    return umq_ub_create_impl(umqh, ctx, option);
+}
+
+static int umq_tp_ub_destroy(uint64_t umqh_tp)
+{
+    return umq_ub_destroy_impl(umqh_tp);
+}
+
+static uint32_t umq_tp_ub_bind_info_get(uint64_t umqh_tp, uint8_t *bind_info, uint32_t max_bind_info_size)
+{
+    return umq_ub_bind_info_get_impl(umqh_tp, bind_info, max_bind_info_size);
+}
+
+static int umq_tp_ub_bind(uint64_t umqh_tp, uint8_t *bind_info, uint32_t bind_info_size)
+{
+    return umq_ub_bind_impl(umqh_tp, bind_info, bind_info_size);
+}
+
+static int umq_tp_ub_unbind(uint64_t umqh_tp)
+{
+    return umq_ub_unbind_impl(umqh_tp);
+}
+
+static int umq_tp_ub_state_set(uint64_t umqh_tp, umq_state_t state)
+{
+    return umq_ub_state_set_impl(umqh_tp, state);
+}
+
+static umq_state_t umq_tp_ub_state_get(uint64_t umqh_tp)
+{
+    return umq_ub_state_get_impl(umqh_tp);
+}
+
+static umq_buf_t *umq_tp_ub_buf_alloc(uint32_t request_size, uint32_t request_qbuf_num, uint64_t umqh_tp,
+    umq_alloc_option_t *option)
+{
+    return umq_ub_buf_alloc_impl(request_size, request_qbuf_num, umqh_tp, option);
+}
+
+static void umq_tp_ub_buf_free(umq_buf_t *qbuf, uint64_t umqh_tp)
+{
+    umq_ub_buf_free_impl(qbuf, umqh_tp);
+}
+
+static int umq_tp_ub_log_config_set(umq_log_config_t *config)
+{
+    return umq_ub_log_config_set_impl(config);
+}
+
+static int umq_tp_ub_log_config_reset(void)
+{
+    return umq_ub_log_config_reset_impl();
+}
+
+static int umq_tp_ub_enqueue(uint64_t umqh_tp, umq_buf_t *qbuf, umq_buf_t **bad_qbuf)
+{
+    return umq_ub_enqueue_impl(umqh_tp, qbuf, bad_qbuf);
+}
+
+static umq_buf_t *umq_tp_ub_dequeue(uint64_t umqh_tp)
+{
+    return umq_ub_dequeue_impl(umqh_tp);
+}
+
+static void umq_tp_ub_notify(uint64_t umqh_tp)
+{
+    return;
+}
+
+static int umq_tp_ub_rearm_interrupt(uint64_t umqh_tp, bool solicated, umq_interrupt_option_t *option)
+{
+    return umq_ub_rearm_impl(umqh_tp, solicated, option);
+}
+
+static int umq_tp_ub_wait_interrupt(uint64_t wait_umqh_tp, int time_out, umq_interrupt_option_t *option)
+{
+    return umq_ub_wait_interrupt_impl(wait_umqh_tp, time_out, option);
+}
+
+static void umq_tp_ub_ack_interrupt(uint64_t umqh_tp, uint32_t nevents, umq_interrupt_option_t *option)
+{
+    umq_ub_ack_interrupt_impl(umqh_tp, nevents, option);
+}
+
+static int umq_tp_ub_async_event_fd_get(umq_trans_info_t *trans_info)
+{
+    return umq_ub_async_event_fd_get(trans_info);
+}
+
+static int umq_tp_ub_async_event_get(umq_trans_info_t *trans_info, umq_async_event_t *event)
+{
+    return umq_ub_async_event_get(trans_info, event);
+}
+
+static void umq_tp_ub_async_event_ack(umq_async_event_t *event)
+{
+    return umq_ub_async_event_ack(event);
+}
+
+static int umq_tp_ub_dev_add_impl(umq_trans_info_t *trans_info, umq_init_cfg_t *cfg)
+{
+    return umq_ub_dev_add_impl(trans_info, cfg);
+}
+
+static int umq_tp_ub_get_route_list_impl(const umq_route_key_t *route_key, umq_route_list_t *route_list)
+{
+    return umq_ub_get_route_list_impl(route_key, route_list);
+}
+
+static int umq_tp_ub_buf_headroom_reset(umq_buf_t *qbuf, uint16_t headroom_size)
+{
+    return umq_qbuf_headroom_reset(qbuf, headroom_size);
+}
+static int umq_tp_ub_mempool_state_get(uint64_t umqh_tp, uint32_t mempool_id, umq_mempool_state_t *mempool_state)
+{
+    return umq_ub_mempool_state_get_impl(umqh_tp, mempool_id, mempool_state);
+}
+
+static int umq_tp_ub_mempool_state_refresh(uint64_t umqh_tp, uint32_t mempool_id)
+{
+    return umq_ub_mempool_state_refresh_impl(umqh_tp, mempool_id);
+}
+
+static int umq_tp_ub_dev_info_get(char *dev_name, umq_trans_mode_t umq_trans_mode, umq_dev_info_t *umq_dev_info)
+{
+    return umq_ub_dev_info_get_impl(dev_name, umq_trans_mode, umq_dev_info);
+}
+
+static umq_dev_info_t *umq_tp_ub_dev_info_list_get(umq_trans_mode_t umq_trans_mode, int *dev_num)
+{
+    return umq_ub_dev_info_list_get_impl(umq_trans_mode, dev_num);
+}
+
+static void umq_tp_ub_dev_info_list_free(umq_trans_mode_t umq_trans_mode, umq_dev_info_t *umq_dev_info)
+{
+    umq_ub_dev_info_list_free_impl(umq_trans_mode, umq_dev_info);
+}
+
+static int umq_tp_ub_cfg_get(uint64_t umqh_tp, umq_cfg_get_t *cfg)
+{
+    return umq_ub_cfg_get_impl(umqh_tp, cfg);
+}
+
+static umq_ops_t g_umq_ub_ops = {
+    .mode = UMQ_TRANS_MODE_UB,
+    // control plane api
+    .umq_tp_load_symbol = umq_tp_ub_symbol_load,
+    .umq_tp_init = umq_tp_ub_init,
+    .umq_tp_uninit = umq_tp_ub_uninit,
+    .umq_tp_create = umq_tp_ub_create,
+    .umq_tp_destroy = umq_tp_ub_destroy,
+    .umq_tp_bind_info_get = umq_tp_ub_bind_info_get,
+    .umq_tp_bind = umq_tp_ub_bind,
+    .umq_tp_unbind = umq_tp_ub_unbind,
+    .umq_tp_state_set = umq_tp_ub_state_set,
+    .umq_tp_state_get = umq_tp_ub_state_get,
+    .umq_tp_log_config_set = umq_tp_ub_log_config_set,
+    .umq_tp_log_config_reset = umq_tp_ub_log_config_reset,
+    .umq_tp_buf_headroom_reset = umq_tp_ub_buf_headroom_reset,
+    .umq_tp_dev_add = umq_tp_ub_dev_add_impl,
+    .umq_tp_get_topo = umq_tp_ub_get_route_list_impl,
+    .umq_tp_mempool_state_get = umq_tp_ub_mempool_state_get,
+    .umq_tp_mempool_state_refresh = umq_tp_ub_mempool_state_refresh,
+    .umq_tp_dev_info_get = umq_tp_ub_dev_info_get,
+    .umq_tp_dev_info_list_get = umq_tp_ub_dev_info_list_get,
+    .umq_tp_dev_info_list_free = umq_tp_ub_dev_info_list_free,
+    .umq_tp_cfg_get = umq_tp_ub_cfg_get,
+
+    // datapath plane api
+    .umq_tp_buf_alloc = umq_tp_ub_buf_alloc,
+    .umq_tp_buf_free = umq_tp_ub_buf_free,
+    .umq_tp_enqueue = umq_tp_ub_enqueue,
+    .umq_tp_dequeue = umq_tp_ub_dequeue,
+    .umq_tp_notify = umq_tp_ub_notify,
+    .umq_tp_rearm_interrupt = umq_tp_ub_rearm_interrupt,
+    .umq_tp_wait_interrupt = umq_tp_ub_wait_interrupt,
+    .umq_tp_ack_interrupt = umq_tp_ub_ack_interrupt,
+    .umq_tp_async_event_fd_get = umq_tp_ub_async_event_fd_get,
+    .umq_tp_async_event_get = umq_tp_ub_async_event_get,
+    .umq_tp_aync_event_ack = umq_tp_ub_async_event_ack,
+};
+
+umq_ops_t *umq_ub_ops_get(void)
+{
+    return &g_umq_ub_ops;
+}

@@ -1,0 +1,49 @@
+#!/bin/bash
+# SPDX-License-Identifier: MIT
+#
+# UMS(UB Memory based Socket)
+#
+# Description: ums_run tool implementation
+#
+# Copyright IBM Corp. 2016, 2018
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+#
+# UMS implementation:
+#     Author(s):  YAO Yufeng ZHANG Chuwen
+
+LIB_NAME="/usr/lib/libums-preload.so"
+
+command_line=$@
+ums_debug_option=$(echo "$command_line" | cut -f 1 -d " ");
+UMS_DEBUG=0;
+while getopts ":d" opt; do
+	case $opt in
+		d)
+			UMS_DEBUG=1;
+			command_line=${command_line#"$ums_debug_option"};
+			command_line=${command_line##\ };
+			;;
+		\?)
+			echo "`basename "$0"`: Error: invalid option: -$OPTARG";
+			exit 1;
+			;;
+	esac
+done
+if [ "x$command_line" = "x" ]; then
+	echo "`basename "$0"`: Error: Missing command param";
+	exit 1;
+fi
+
+export UMS_DEBUG;
+if [ $UMS_DEBUG -ne 0 ]; then
+	echo "Current ums_run does not suppot debug, Please remove -d opt";
+	exit 1;
+fi
+#
+# Execute the specified command.
+#
+export LD_PRELOAD=$LD_PRELOAD:$LIB_NAME;
+echo "LD_PRELOAD=${LD_PRELOAD}";
+
+exec $command_line
+exit $?;

@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
+
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("//:bazel/copts.bzl", "UMQ_DEFAULT_STATIC_COPTS")
+
+cc_library(
+    name = "umq",
+    srcs = glob([
+        "umq/dfx/*.c",
+        "umq/qbuf/*.c",
+        "umq/umq_ub/**/*.c",
+        "umq/*.c",
+        "util/*.c",
+        "util/*.cpp",
+    ]),
+    hdrs = glob([
+        "umq/dfx/*.h",
+        "umq/qbuf/*.h",
+        "umq/umq_ub/**/*.h",
+        "umq/*.h",
+        "util/*.h",
+    ]),
+    includes = [
+        "umq/dfx",
+        "umq/qbuf",
+        "umq/umq_ub",
+        "umq/umq_ub/core",
+        "umq/umq_ub/core/flow_control",
+        "umq/umq_ub/core/private",
+        "umq",
+        "util",
+    ],
+    copts = UMQ_DEFAULT_STATIC_COPTS + [
+        "-DUMQ_STATIC_LIB",
+    ],
+    linkopts = ["-lpthread"],
+    deps = [
+        "//include:umq_headers",
+        "//include:umq_tp_headers",
+        "//include:umq_ub_headers",
+        "@boringssl//:ssl",
+        "@boringssl//:crypto",
+        "@urma//:urma_headers",
+        "//include:framework_headers",
+    ],
+    features = [
+        "static_library",
+        "-pic",
+        "-supports_pic",
+    ],
+    linkstatic = True,
+)

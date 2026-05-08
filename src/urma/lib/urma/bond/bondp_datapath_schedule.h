@@ -1,0 +1,37 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
+ * Description: Bond provider datapath schedule header file
+ * Author: Wang Hang
+ * Create: 2026-04-06
+ * Note:
+ * History: 2026-04-06   Create File
+ */
+
+#ifndef BONDP_DATAPATH_SCHEDULE_H
+#define BONDP_DATAPATH_SCHEDULE_H
+
+#include <stdint.h>
+
+#include "bondp_connection.h"
+
+#define BONDP_CHIP_ID_MIN 1
+#define BONDP_CHIP_ID_MAX 2
+
+#define BONDP_CHIP_ID_MIN_START_PORT 2
+#define BONDP_CHIP_ID_MIN_END_PORT   10
+
+#define BONDP_CHIP_ID_MAX_START_PORT 11
+#define BONDP_CHIP_ID_MAX_END_PORT   19
+
+typedef struct bondp_chip_id_info {
+    uint32_t src_chip_id;
+    uint32_t dst_chip_id;
+} bondp_chip_id_info_t;
+
+int schedule_send(urma_target_jetty_t *tjetty, bondp_comp_t *bdp_comp, int *send_idx, int *target_idx,
+    bondp_chip_id_info_t *info);
+
+int schedule_recv(bondp_comp_t *bdp_comp, int *recv_idx);
+
+#endif // BONDP_DATAPATH_SCHEDULE_H
