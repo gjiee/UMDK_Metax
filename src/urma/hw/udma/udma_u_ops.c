@@ -95,6 +95,17 @@ static urma_ops_t g_udma_ops = {
 	.unregister_seg = udma_u_unregister_seg,
 	.import_seg = udma_u_import_seg,
 	.unimport_seg = udma_u_unimport_seg,
+	/*
+	 * GDR provider 绑定位置 (comment only, 暂未启用):
+	 *
+	 *     .register_seg_dmabuf = udma_u_register_seg_dmabuf,
+	 *     .query_dmabuf_caps   = udma_u_query_dmabuf_caps,
+	 *
+	 * 一旦 urma_ops_t 结构正式接受这两个新字段, 把上面两行解开即可让 udma
+	 * 设备走 dma-buf 注册段. 当前 udma_u_segment.c 里的 stub 只是占位,
+	 * 假装"驱动还没支持 GDR", 调用方收到 NULL/ENOTSUP 后会切到 host-proxy
+	 * 模式.
+	 */
 	.get_async_event = udma_u_get_async_event,
 	.ack_async_event = udma_u_ack_async_event,
 	.user_ctl = udma_u_user_ctl,

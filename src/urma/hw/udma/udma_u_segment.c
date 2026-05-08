@@ -232,3 +232,85 @@ urma_status_t udma_u_unimport_seg(urma_target_seg_t *target_seg)
 
 	return URMA_SUCCESS;
 }
+
+/* =========================================================================
+ * GDR (GPU Direct RDMA) provider hook -- skeleton.
+ *
+ * 这是什么 (What):
+ *   HiSilicon udma 用户态 provider 的"dma-buf 注册段"实现.
+ *   是 urma_seg_dmabuf.c::urma_register_seg_dmabuf() 真正落地的函数.
+ *
+ *   一旦 urma_ops 加上 register_seg_dmabuf 字段 (见 urma_provider.h 注释块),
+ *   udma 在 ops 注册入口里挂载:
+ *
+ *       static urma_ops_t g_udma_ops = {
+ *           ...
+ *           .register_seg          = udma_u_register_seg,
+ *           .unregister_seg        = udma_u_unregister_seg,
+ *           .register_seg_dmabuf   = udma_u_register_seg_dmabuf,   // <-- 新
+ *           .query_dmabuf_caps     = udma_u_query_dmabuf_caps,     // <-- 新
+ *           ...
+ *       };
+ *
+ * 怎么实现 (How, 给内核老兵):
+ *   用户态这一层做的事和现有 udma_u_register_seg() 几乎一样, 区别只有两点:
+ *
+ *     1) 不再调 ummu_grant() 把 va 翻译成 IPA (因为 dma-buf 由内核
+ *        ubcore + ummu 拿 sg_table 写映射, 不走 SVA 一这条);
+ *     2) 在 udata.in_*** 里塞 dmabuf_fd / dmabuf_offset, 走
+ *        urma_cmd_register_seg() 一次性把 fd 透传给内核.
+ *
+ *   完整流程 (待 ABI patch 后):
+ *     a. udma_u_check_seg_cfg(): 允许 va==0; flag.bs.mem_type==DMABUF;
+ *     b. udma_u_init_seg_cfg(): 把 dmabuf_fd/offset 缓存到 udma_u_segment;
+ *     c. urma_cmd_register_seg(ctx, &tseg, cfg, &udata): 透传 fd/offset;
+ *     d. 内核 uburma -> ubcore_register_seg_dmabuf() -> dma_buf_get +
+ *        dma_buf_attach(&nic->dev) + dma_buf_map_attachment ->
+ *        ummu_register_sgt() (新增) 把 sg_table 写进 NIC MAPT;
+ *     e. 返回 urma_target_seg_t.
+ *
+ * 当前阶段 (Current state):
+ *   - register_seg_dmabuf 字段还未真正加进 urma_ops, 因此本 stub *不会被*
+ *     liburma 调到. 但保留这个函数, 让后续 ABI 启用日的 patch 改动量最小.
+ *   - 函数体只 print + 返回 NULL, 假装"驱动还不支持".
+ *   - 同时给一个 udma_u_query_dmabuf_caps 的 stub.
+ *
+ * 给内核老兵的提示:
+ *   你以前在 RDMA peermem 路径下熟悉的 nvidia_p2p_get_pages() 这条不要走,
+ *   URMA 内核侧只走 dma-buf, 维护更简单且与 5.x 内核 mainline 一致.
+ * ========================================================================= */
+
+#include <errno.h>
+
+urma_target_seg_t *udma_u_register_seg_dmabuf(urma_context_t *urma_ctx,
+					      urma_seg_cfg_t *seg_cfg,
+					      int dmabuf_fd,
+					      uint64_t offset)
+{
+	(void)urma_ctx;
+	(void)seg_cfg;
+	UDMA_LOG_ERR("udma_u_register_seg_dmabuf: stub called fd=%d off=%lu, "
+		     "ABI not yet enabled -- returning NULL (ENOTSUP).\n",
+		     dmabuf_fd, (unsigned long)offset);
+	errno = EOPNOTSUPP;
+	return NULL;
+}
+
+urma_status_t udma_u_query_dmabuf_caps(urma_device_t *dev, void *caps_out)
+{
+	(void)dev;
+	(void)caps_out;
+	/*
+	 * 真实现 (待 ABI 启用):
+	 *   struct udma_u_dev *udma_dev = to_udma_u_dev(dev);
+	 *   caps->support_dmabuf  = udma_dev->fw_caps.dmabuf;
+	 *   caps->support_dynamic = udma_dev->fw_caps.dmabuf_dynamic;
+	 *   caps->max_seg_size    = udma_dev->fw_caps.max_seg_size;
+	 *   caps->supported_alignments = (1u << 12) | (1u << 21);
+	 *
+	 * 当前不知道具体内核侧 fw_caps 字段是否已经提供 dmabuf 能力位, 所以
+	 * 一律返回"不支持". perftest 拿到这个就走 host-proxy 路径.
+	 */
+	UDMA_LOG_ERR("udma_u_query_dmabuf_caps: stub -> support=0\n");
+	return URMA_SUCCESS;
+}
