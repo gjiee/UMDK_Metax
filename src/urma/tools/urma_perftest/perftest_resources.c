@@ -745,6 +745,20 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     uint32_t i = 0, j = 0, k = 0;
     const uint64_t perftest_page_size_2MB = 2 * 1024 * 1024;
     const uint64_t perftest_page_size_1GB = 1024 * 1024 * 1024;
+    /*
+     * GDR 改造接入点 (TODO, 见 perftest_memory.h):
+     *
+     *   if (ctx->mem_ops == NULL) {
+     *       ctx->mem_ops = perftest_memory_create(cfg);  // host / cuda / rocm / dmabuf
+     *       if (!ctx->mem_ops || ctx->mem_ops->init(ctx->mem_ops, cfg) != 0)
+     *           return -1;
+     *   }
+     *   后续 alloc_buffer 与 urma_register_seg / urma_register_seg_dmabuf
+     *   都按 mem_ops 的指引走.
+     *
+     * 当前 commit 不在这里替换主流程, 只把抽象层 (perftest_memory.h +
+     * perftest_mem_*.c) 准备好, 让真正改主流程的 patch 改动量最小.
+     */
     ctx->local_buf = calloc(1, sizeof(void *) * cfg->jettys);
     if (ctx->local_buf == NULL) {
         return -ENOMEM;
@@ -841,6 +855,25 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
             if (ctx->urma_ctx->dev->type == URMA_TRANSPORT_UB) {
                 seg_cfg.token_id = ctx->token_id[j];
             }
+            /*
+             * GDR 分发点 (TODO):
+             *   if (ctx->mem_ops &&
+             *       ctx->mem_ops->gdr_mode == PERFTEST_GDR_DIRECT &&
+             *       ctx->dmabuf_fds[j] >= 0) {
+             *       ctx->local_tseg[j] = urma_register_seg_dmabuf(
+             *           ctx->urma_ctx, &seg_cfg,
+             *           ctx->dmabuf_fds[j], ctx->dmabuf_offsets[j]);
+             *       if (!ctx->local_tseg[j] && errno == EOPNOTSUPP) {
+             *           // GDR 不可用 -> 自动降级到 host-proxy 模式,
+             *           // 重新分配一个 host shadow buffer 然后再 register_seg.
+             *           perftest_fallback_to_host_proxy(ctx, cfg, j);
+             *           ctx->local_tseg[j] =
+             *               urma_register_seg(ctx->urma_ctx, &seg_cfg);
+             *       }
+             *   } else {
+             *       ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg);
+             *   }
+             */
             ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg);
         } else {
             ctx->local_tseg[j] = ctx->local_tseg[0];

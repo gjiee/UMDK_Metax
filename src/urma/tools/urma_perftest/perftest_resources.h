@@ -117,6 +117,20 @@ typedef struct perftest_context {
 
     /* write dirty thread */
     pthread_t write_dirty_thread_id;
+
+    /*
+     * GDR 框架 (comment only, 暂未真正加进 struct, 因为 ABI 改动 + 上层
+     * malloc 的 sizeof 要随之调整):
+     *
+     *   struct perftest_memory_ops *mem_ops;       // host / cuda / rocm / dmabuf
+     *   int     *dmabuf_fds;                       // per-jetty dma-buf fd
+     *   uint64_t *dmabuf_offsets;                  // per-jetty offset
+     *   void   **gpu_ptrs;                         // PROXY 模式下保留 GPU 指针
+     *   void   **host_shadow_bufs;                 // PROXY 模式下的 pinned host shadow
+     *
+     * register_mem 真正 GDR 化时会 calloc 这些数组.
+     * 详见 perftest_memory.h 与 docs/urma_gdr_analysis.md 5.4.
+     */
 } perftest_context_t;
 
 typedef struct perftest_thread_arg {
