@@ -79,6 +79,24 @@ typedef enum urma_cmd_free_token_id_type {
 } urma_cmd_free_token_id_type_t;
 
 /* See urma_cmd_register_seg_t, consistent with enum uburma_cmd_register_seg_type */
+/*
+ * GDR TLV 扩展位置 (comment only):
+ *   计划在 In type 末尾 (REGISTER_SEG_IN_UDATA 之前) 插入两个新枚举:
+ *
+ *       REGISTER_SEG_IN_DMABUF_FD,
+ *       REGISTER_SEG_IN_DMABUF_OFFSET,
+ *
+ *   配套在 urma_cmd_tlv.c::urma_ioctl_register_seg() 中:
+ *       ATTR(a++, REGISTER_SEG_IN_DMABUF_FD,     arg->in.dmabuf_fd);
+ *       ATTR(a++, REGISTER_SEG_IN_DMABUF_OFFSET, arg->in.dmabuf_offset);
+ *
+ *   注意 TLV 兼容性: 内核侧解析时 unknown attr 会被忽略 (这是 TLV 设计的
+ *   核心好处). 因此用户态先发新 attr, 老内核会 silent drop -> 调用方拿到
+ *   "走了 host 路径"的结果, 不会 crash, 但会失去 GDR 加速. 要避免这种
+ *   情况, 调用方应当先 urma_query_dmabuf_caps() 探测.
+ *
+ *   详见 docs/urma_gdr_analysis.md \xc2\xa75.1 第 7-8 项.
+ */
 typedef enum urma_cmd_register_seg_type {
     /* In type */
     REGISTER_SEG_IN_VA,

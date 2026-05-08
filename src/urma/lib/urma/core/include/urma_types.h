@@ -869,6 +869,47 @@ typedef struct urma_ubva {
 
 
 /* segment definition */
+/* =========================================================================
+ * GDR (GPU Direct RDMA) framework -- ABI extension PROPOSAL (comment only).
+ *
+ * 这是什么 (What):
+ *   下面 union urma_reg_seg_flag.bs 共 18 bit reserved, 计划从中切出 3 bit
+ *   做 mem_type 选择 (host / dmabuf / device-peer). 同时 urma_seg_cfg 末尾
+ *   计划新增 dmabuf_fd / dmabuf_offset 两个字段, 由 urma_register_seg_dmabuf
+ *   填.
+ *
+ *   计划的 layout:
+ *
+ *       union urma_reg_seg_flag.bs
+ *           token_policy     : 3
+ *           cacheable        : 1
+ *           dsva             : 1
+ *           access           : 6
+ *           non_pin          : 1   // 与 mem_type==DMABUF 互斥
+ *           user_iova        : 1
+ *           token_id_valid   : 1
+ *           mem_type         : 3   // *** NEW: 0=HOST 1=DMABUF 2=PEER ***
+ *           reserved         : 15  // (was 18)
+ *
+ *       struct urma_seg_cfg {
+ *           ...原有 7 个字段保持不变 (头部 ABI 兼容)...
+ *           int32_t  dmabuf_fd;          // *** NEW, -1 = host path ***
+ *           uint64_t dmabuf_offset;      // *** NEW, offset in dma-buf ***
+ *       };
+ *
+ * 给内核老兵的提示 (How):
+ *   - mem_type 为何要在 flag 里再开一份, 而不是单看 dmabuf_fd != -1?
+ *     答: 兼容老调用方按值拷贝 urma_seg_cfg 时不会带新字段; 老路径里
+ *     dmabuf_fd 的内存默认是 0, 0 在 fd 语义上代表 stdin, 不是哨兵.
+ *     所以必须 mem_type 显式区分.
+ *   - non_pin 与 dmabuf 互斥的原因: dma-buf 已经由 exporter 决定 pinned
+ *     与否, 重复语义会让内核 ubcore 处理 movable dmabuf 时混乱.
+ *
+ * 当前阶段:
+ *   下面的结构 *本次 commit 不真改*. 真正改动需要 (a) liburma + (b) uburma
+ *   ioctl 头 + (c) ubcore + (d) udma 同步 PR. 完整 patch 清单见
+ *   docs/urma_gdr_analysis.md \xc2\xa75.1.
+ * ======================================================================= */
 typedef union urma_reg_seg_flag {
     struct {
         uint32_t token_policy   : 3; /* 0: URMA_TOKEN_NONE.
@@ -959,7 +1000,26 @@ typedef struct urma_seg_cfg {
     urma_reg_seg_flag_t flag;
     uint64_t user_ctx;
     uint64_t iova; /* user iova, maybe zero-based-address */
+    /*
+     * GDR ABI 扩展位置 (comment only, 当前未真正添加):
+     *
+     *     int32_t  dmabuf_fd;       // -1 = host path, 否则取 dma-buf
+     *     uint64_t dmabuf_offset;   // offset within the dma-buf
+     *
+     * 一旦正式加上, 老调用方传值赋值时这两个字段需要默认 -1 / 0; 推荐做法是
+     * 在 hw provider register_seg() 入口 if (cfg->flag.bs.mem_type == DMABUF)
+     * 才读取它们. 详见 docs/urma_gdr_analysis.md \xc2\xa75.1.
+     */
 } urma_seg_cfg_t;
+
+/*
+ * 设备能力位 (urma_device_attr_t.dev_cap.feature.bs) 计划加 1 bit:
+ *
+ *     uint32_t dmabuf : 1;  // 该 NIC + 内核 ubcore 链路是否能 import dma-buf
+ *
+ * 由 hw provider 在 query_device() 时填; perftest 的 init_device()
+ * 调 urma_query_dmabuf_caps() 时直接读这一位返回给上层.
+ */
 
 typedef struct urma_seg {
     urma_ubva_t ubva;     /* [Public] ubva of segment. */

@@ -149,6 +149,25 @@ typedef struct urma_ops {
     urma_status_t (*free_token_id)(urma_token_id_t *token_id);
     urma_target_seg_t *(*register_seg)(urma_context_t *ctx, urma_seg_cfg_t *seg_cfg);
     urma_status_t (*unregister_seg)(urma_target_seg_t *target_seg);
+    /*
+     * GDR provider ops 扩展 (comment only, 本次不真正添加):
+     *
+     *     urma_target_seg_t *(*register_seg_dmabuf)(urma_context_t *ctx,
+     *                                               urma_seg_cfg_t *seg_cfg,
+     *                                               int dmabuf_fd,
+     *                                               uint64_t offset);
+     *     urma_status_t (*query_dmabuf_caps)(urma_device_t *dev,
+     *                                        urma_dmabuf_caps_t *caps);
+     *
+     * 这两个回调由具体 hw provider (例如 src/urma/hw/udma/udma_u_segment.c
+     * 中的 udma_u_register_seg_dmabuf) 实现, 然后在 provider 的 ops 注册
+     * 入口里 ops->register_seg_dmabuf = udma_u_register_seg_dmabuf.
+     *
+     * 注: 加这两个字段属于 ABI 改动 (sizeof(urma_ops_t) 增大), 必须随 lib +
+     * 所有 provider + 调用方 (perftest, ubagg, bond) 同步发布. 本次仅以
+     * 注释表达, 让 register_seg_dmabuf wrapper (urma_seg_dmabuf.c) 暂时
+     * 返回 ENOTSUP, 用户态自动走 host-proxy fallback.
+     */
     urma_target_seg_t *(*import_seg)(urma_context_t *ctx, urma_seg_t *seg, urma_token_t *token, uint64_t addr,
                                      urma_import_seg_flag_t flag);
     urma_status_t (*unimport_seg)(urma_target_seg_t *target_seg);

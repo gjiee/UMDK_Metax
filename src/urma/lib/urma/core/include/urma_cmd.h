@@ -187,6 +187,28 @@ typedef struct urma_cmd_register_seg {
         uint64_t token_id_handle;
         uint32_t token;
         uint32_t flag;
+        /*
+         * GDR IOCTL ABI 扩展位置 (comment only):
+         *
+         *     int32_t  dmabuf_fd;       // -1 = host path
+         *     uint64_t dmabuf_offset;   // offset within the dma-buf
+         *
+         * 内核 uburma 在 cmd dispatch 时:
+         *     if (in.dmabuf_fd >= 0)
+         *         ubcore_register_seg_dmabuf(ubc_dev, &cfg, in.dmabuf_fd,
+         *                                    in.dmabuf_offset);
+         *     else
+         *         ubcore_register_seg(ubc_dev, &cfg);
+         *
+         * 给内核老兵: 把 dmabuf_fd 透传给 ubcore_register_seg_dmabuf, 它在
+         * 内核里 dma_buf_get(fd) -> dma_buf_attach(&nic->dev) ->
+         * dma_buf_map_attachment 拿到 sg_table, 填进 NIC MAPT/MTT.
+         * 这一段路径与 RDMA 子系统 ib_umem_dmabuf_get() 等价.
+         *
+         * 当前不真正加, 因为内核侧 uburma_cmd_register_seg_t (位于 openEuler
+         * kernel uABI 头) 必须先扩展, 否则用户态填这两字段也读不到. 详见
+         * docs/urma_gdr_analysis.md \xc2\xa75.3.
+         */
     } in;
     struct {
         uint32_t token_id;
