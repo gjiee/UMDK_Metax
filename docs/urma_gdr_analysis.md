@@ -517,6 +517,105 @@ perftest_memory_ops_t *perftest_dmabuf_mem_create(perftest_config_t *);
 
 ---
 
+## 9.5 主机代理模式 vs GDR 直传模式 (host-proxy vs GDR-direct)
+
+为了让 URMA 在"NIC / 内核还没装 GDR 驱动"的环境也能跑 GPU 数据,
+框架定义两种工作模式, 由 `perftest_gdr_mode_t` 选择, 由
+`ops->negotiate_gdr_mode()` 在运行时探测后写入 `ops->gdr_mode`:
+
+### `PERFTEST_GDR_DIRECT` — 真 GDR
+
+```
+                       (NIC DMA reads/writes here)
+                                     |
+                                     v
+   +----------+      +-------------------------------+
+   | GPU HBM  |<====>|  cuMemAlloc + cuMemGetHandle  |
+   | (device) |      |  --DMA_BUF_FD--+              |
+   +----------+      +-------------------------------+
+                                     |
+                          urma_register_seg_dmabuf(ctx, &cfg, fd, off)
+                                     |
+                                     v
+                +---------------------------------------+
+                | uburma -> ubcore_register_seg_dmabuf  |
+                |   dma_buf_get(fd)                     |
+                |   dma_buf_attach(&nic->dev)           |
+                |   dma_buf_map_attachment -> sg_table  |
+                |   ummu/MAPT 写映射                    |
+                +---------------------------------------+
+```
+
+- **优点**: 零拷贝, NIC 直接读/写 GPU BAR1, 真正的 GPUDirect RDMA 性能.
+- **要求**: 同时具备 (a) GPU 用户态运行时支持 dma-buf 导出 (CUDA ≥ 12.2,
+  ROCm ≥ 6.0); (b) NIC 驱动 + ubcore 内核侧支持 `dma_buf_attach` import;
+  (c) IOMMU 能正确处理 P2P sg_list.
+- **失败时退路**: 自动 fallback 到 host-proxy.
+
+### `PERFTEST_GDR_HOST_PROXY` — 主机代理 (无 GDR 时使用)
+
+```
+   +----------+        cuMemcpyDtoH        +------------------+
+   | GPU HBM  |---------------------------->| host pinned shadow
+   | (device) |    (per-iteration stage)    | (cuMemAllocHost) |
+   +----------+<----------------------------+------------------+
+                       cuMemcpyHtoD                |
+                                                   |  urma_register_seg(host)
+                                                   v
+                                       +----------------------+
+                                       |   NIC DMA from host  |
+                                       +----------------------+
+```
+
+- **数据通路**: 应用代码以为自己在 GPU 上操作; 每次 `post_jfs_wr` 之前
+  `ops->stage_to_nic_buffer()` 把 GPU 数据 `cuMemcpyDtoH` 拷到一份 host
+  pinned shadow; URMA 注册的就是 shadow; recv 完成后
+  `ops->stage_from_nic_buffer()` 再 `cuMemcpyHtoD` 回 GPU.
+- **优点**: 不需要任何内核 GDR 驱动支持, 任何 ubcore + udma 组合都能跑;
+  非常适合 CI 与开发环境; 与 NCCL `NET_DISABLE_GDR=1` 这条 fallback 路径
+  语义一致.
+- **缺点**: 多两次 PCIe `cuMemcpy*`, 带宽与延迟比 DIRECT 差 ~2x.
+
+### 协商与回退流程
+
+```c
+ops = perftest_memory_create(cfg);
+ops->init(ops, cfg);
+ops->negotiate_gdr_mode(ops, urma_dev);
+/* 内部:
+ *   urma_query_dmabuf_caps(urma_dev, &caps);
+ *   if (cfg->gdr_mode == AUTO)
+ *       ops->gdr_mode = caps.support_dmabuf ? DIRECT : HOST_PROXY;
+ *   else if (cfg->gdr_mode == DIRECT && !caps.support_dmabuf)
+ *       return -1;        // 用户强制 DIRECT 但驱动没支持 -> 报错
+ *   else
+ *       ops->gdr_mode = cfg->gdr_mode;
+ */
+
+ops->alloc_buffer(...);      // 按 gdr_mode 分配 GPU 或 GPU+shadow
+
+/* IO 主循环:
+ *   for (i = 0; i < iters; i++) {
+ *       ops->stage_to_nic_buffer(ops, shadow, gpu_ptr, len);   // PROXY 才搬
+ *       urma_post_jfs_wr(...);
+ *       poll_jfc(...);
+ *       ops->stage_from_nic_buffer(ops, gpu_ptr, shadow, len); // PROXY 才搬
+ *   }
+ */
+```
+
+### 在内核老兵眼里的等价物
+
+| host-proxy 概念 | 你熟悉的内核同构 |
+| --- | --- |
+| host pinned shadow | `swiotlb` bounce buffer |
+| `stage_to_nic_buffer` | `swiotlb_tbl_map_single` 的 sync 阶段 |
+| `urma_query_dmabuf_caps` | `pci_p2pdma_distance()` 的能力探测 |
+| GDR-direct 路径 | `pci_p2pdma_publish` + 直接拿 `dma_addr_t` |
+| GDR fallback to PROXY | `dma_map_page(SWIOTLB)` 因为 `dma_capable()` 返回 false |
+
+---
+
 ## 10. 一句话结论
 
 URMA 当前**完全没有**类 GDR 的接口。要追平 RDMA 社区
@@ -529,6 +628,10 @@ URMA 当前**完全没有**类 GDR 的接口。要追平 RDMA 社区
    接管"pin 用户页"逻辑；
 4. **工具层**：在 `urma_perftest` 中引入 `perftest_memory_ops` 抽象，并实现
    `host / cuda / rocm / 直传 dmabuf` 四个后端，重写所有直接读写
-   `local_buf` 的代码点。
+   `local_buf` 的代码点；
+5. **运行时**：用 `perftest_gdr_mode_t` 区分 **GDR 直传** 与 **主机代理**
+   两条路径——前者 NIC 直 DMA GPU，后者用 host pinned shadow 做 bounce
+   buffer。`negotiate_gdr_mode()` 在 init 后探测能力, 决定走哪条。
 
-参考第 5、6 节 Patch 清单与 9 节示意头文件即可作为下一阶段开发与代码评审的入口。
+参考第 5、6 节 Patch 清单、第 9.5 节两模式数据通路图，以及第 9 节示意头文件
+即可作为下一阶段开发与代码评审的入口。

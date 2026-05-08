@@ -128,6 +128,52 @@ static uint8_t dmabuf_read_byte(perftest_memory_ops_t *self, const void *addr,
     return 0;
 }
 
+static int dmabuf_negotiate(perftest_memory_ops_t *self, void *urma_dev_opaque)
+{
+    /*
+     * dmabuf 后端的 fd 来自外部, 没 GPU 运行时可问. 只看 NIC 一侧:
+     *   urma_dmabuf_caps_t caps;
+     *   urma_query_dmabuf_caps((urma_device_t *)urma_dev_opaque, &caps);
+     *   self->gdr_mode = caps.support_dmabuf ? PERFTEST_GDR_DIRECT
+     *                                        : PERFTEST_GDR_HOST_PROXY;
+     *   PROXY 这种情况下要把 fd mmap 出来当 host shadow, 其实就退化成
+     *   "用户已经自己分配 host 内存", 价值有限. 真实现可以在这里直接报错
+     *   并要求用户改用 --use_huge_page.
+     */
+    (void)urma_dev_opaque;
+    self->gdr_mode = PERFTEST_GDR_HOST_PROXY;
+    fprintf(stderr,
+            "[perftest-mem][dmabuf] negotiate: NIC dma-buf NOT supported -> "
+            "host-proxy (will mmap fd as host shadow if exporter allows)\n");
+    return 0;
+}
+
+static int dmabuf_stage_to_nic(perftest_memory_ops_t *self, void *shadow_addr,
+                               void *gpu_addr, size_t len)
+{
+    (void)self; (void)shadow_addr; (void)gpu_addr;
+    /*
+     * 通用 dma-buf 后端没法做"GPU->host"的拷贝 (没有运行时), 只能依赖外部
+     * 进程在写完 fd 之后调用 perftest. 这里 stage_to_nic 真正可做的事是
+     * dma_buf_sync(DMA_BUF_SYNC_START | DMA_BUF_SYNC_WRITE) 用户态形式
+     * (DMA_BUF_IOCTL_SYNC), 让缓存一致性生效.
+     */
+    fprintf(stderr,
+            "[perftest-mem][dmabuf] stage_to_nic stub: would DMA_BUF_IOCTL_SYNC START %zu\n",
+            len);
+    return 0;
+}
+
+static int dmabuf_stage_from_nic(perftest_memory_ops_t *self, void *gpu_addr,
+                                 void *shadow_addr, size_t len)
+{
+    (void)self; (void)gpu_addr; (void)shadow_addr;
+    fprintf(stderr,
+            "[perftest-mem][dmabuf] stage_from_nic stub: would DMA_BUF_IOCTL_SYNC END %zu\n",
+            len);
+    return 0;
+}
+
 perftest_memory_ops_t *perftest_dmabuf_mem_create(perftest_config_t *cfg)
 {
     (void)cfg;
@@ -143,6 +189,7 @@ perftest_memory_ops_t *perftest_dmabuf_mem_create(perftest_config_t *cfg)
     }
     priv->ext_fd = -1;
     ops->type                  = PERFTEST_MEM_DMABUF;
+    ops->gdr_mode              = PERFTEST_GDR_AUTO;
     ops->priv                  = priv;
     ops->init                  = dmabuf_init;
     ops->destroy               = dmabuf_destroy;
@@ -153,6 +200,9 @@ perftest_memory_ops_t *perftest_dmabuf_mem_create(perftest_config_t *cfg)
     ops->copy_buffer_to_buffer = dmabuf_copy_b2b;
     ops->write_byte            = dmabuf_write_byte;
     ops->read_byte             = dmabuf_read_byte;
+    ops->negotiate_gdr_mode    = dmabuf_negotiate;
+    ops->stage_to_nic_buffer   = dmabuf_stage_to_nic;
+    ops->stage_from_nic_buffer = dmabuf_stage_from_nic;
     fprintf(stderr, "[perftest-mem][dmabuf] create: stub ok\n");
     return ops;
 }

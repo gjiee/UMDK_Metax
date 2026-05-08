@@ -53,11 +53,38 @@
  *
  * 现阶段为了不引入 cuda.h, 全部以 void * 占位 + 注释说明.
  */
+/*
+ * 私有上下文.
+ *
+ * 真实现里会有更多字段, 这里以注释列出关键的两个分支:
+ *
+ *   DIRECT 模式:
+ *      d_ptr           : CUdeviceptr  -- GPU 设备指针, 同时也是 perftest 上层
+ *                                        看到的 "buffer 地址" (alloc_buffer 出参).
+ *      dmabuf_fd, off  : 由 cuMemGetHandleForAddressRange 拿到, perftest 注册
+ *                        段时通过 urma_register_seg_dmabuf 透传.
+ *      shadow_addr     : 不存在.
+ *
+ *   HOST_PROXY 模式 (无 GDR 驱动时):
+ *      d_ptr           : 仍然 cuMemAlloc 出来, 模拟"应用数据在 GPU 上";
+ *      shadow_addr     : cuMemAllocHost 出的 pinned host buffer, perftest 上
+ *                        层看到的 "buffer 地址" (alloc_buffer 出参), URMA 注
+ *                        册的就是它;
+ *      stage_to_nic    : cuMemcpyDtoH(shadow_addr, d_ptr, len) 在每次发送前;
+ *      stage_from_nic  : cuMemcpyHtoD(d_ptr, shadow_addr, len) 在每次接收后;
+ *      dmabuf_fd       : -1 (URMA 走 host 路径).
+ */
 typedef struct cuda_priv {
     int   gpu_id;          /* TODO: 改为 CUdevice */
     void *cuctx_opaque;    /* TODO: 改为 CUcontext */
-    int   use_dmabuf;
+    int   use_dmabuf;      /* CLI 显式要求 dma-buf */
     int   driver_version;
+    /*
+     * 下面这几个字段 PROXY 模式下要用到, 当前是 stub, 不分配也不操作:
+     */
+    void *d_ptr_opaque;    /* TODO: CUdeviceptr cuMemAlloc 结果 */
+    void *shadow_addr;     /* TODO: cuMemAllocHost 结果 */
+    size_t buffer_size;
 } cuda_priv_t;
 
 static int cuda_init(perftest_memory_ops_t *self, perftest_config_t *cfg)
@@ -90,36 +117,58 @@ static int cuda_alloc_buffer(perftest_memory_ops_t *self,
                              int *out_dmabuf_fd,
                              uint64_t *out_dmabuf_offset)
 {
-    (void)self; (void)size; (void)alignment;
+    (void)alignment;
     /*
-     * TODO 真实现 (与 RDMA perftest cuda_allocate_device_memory_buffer 等价):
+     * 两种 GDR 模式的真实现 (二选一, self->gdr_mode 由 negotiate 决定):
      *
-     *   CUdeviceptr d_A;
-     *   CUCHECK(cuMemAlloc(&d_A, ALIGN_UP(size, 64*1024)));
+     * (1) PERFTEST_GDR_DIRECT (NIC 直接 DMA GPU):
      *
-     *   if (priv->use_dmabuf) {
+     *       CUdeviceptr d_A;
+     *       CUCHECK(cuMemAlloc(&d_A, ALIGN_UP(size, 64*1024)));
+     *
      *       size_t host_pg = sysconf(_SC_PAGESIZE);
      *       CUdeviceptr aligned = d_A & ~(host_pg - 1);
-     *       uint64_t offset = d_A - aligned;
-     *       size_t  asize = ALIGN_UP(size + offset, host_pg);
-     *       int fd;
+     *       uint64_t off = d_A - aligned;
+     *       size_t   alen = ALIGN_UP(size + off, host_pg);
+     *       int      fd;
      *       CUCHECK(cuMemGetHandleForAddressRange(
-     *           &fd, aligned, asize,
+     *           &fd, aligned, alen,
      *           CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0));
+     *
+     *       priv->d_ptr_opaque = (void *)d_A;
+     *       *out_addr          = (void *)d_A;     // GPU 设备指针, NIC 直接 DMA
      *       *out_dmabuf_fd     = fd;
-     *       *out_dmabuf_offset = offset;
-     *   } else {
-     *       *out_dmabuf_fd     = -1;
+     *       *out_dmabuf_offset = off;
+     *
+     * (2) PERFTEST_GDR_HOST_PROXY (主机代理):
+     *
+     *       CUdeviceptr d_A;
+     *       CUCHECK(cuMemAlloc(&d_A, size));        // 应用数据"假装"在 GPU 上
+     *       void *shadow;
+     *       CUCHECK(cuMemAllocHost(&shadow, size)); // pinned host shadow
+     *
+     *       priv->d_ptr_opaque = (void *)d_A;
+     *       priv->shadow_addr  = shadow;
+     *       priv->buffer_size  = size;
+     *
+     *       *out_addr          = shadow;          // *** URMA 注册的是 shadow ***
+     *       *out_dmabuf_fd     = -1;              // host 路径, 不走 dma-buf
      *       *out_dmabuf_offset = 0;
-     *   }
-     *   *out_addr = (void *)d_A;
-     *   return 0;
+     *
+     *   PROXY 模式下:
+     *     - 上层看见的 "local_buf" 就是 host shadow, 一切 register_seg /
+     *       write_dirty / sentinel polling 都能照旧工作.
+     *     - 每个 IO 迭代之前, 主程序应当调 stage_to_nic_buffer 把 GPU ->
+     *       shadow 拷一次; 接收完成后调 stage_from_nic_buffer 把 shadow
+     *       -> GPU 拷回去.
+     *     - 这两次 cuMemcpy 就是 "host proxy" 相对真 GDR 的多余开销.
      */
     if (out_addr)          *out_addr = NULL;
-    if (out_dmabuf_fd)     *out_dmabuf_fd = -1;     /* 装作主机内存路径走通 */
+    if (out_dmabuf_fd)     *out_dmabuf_fd = -1;
     if (out_dmabuf_offset) *out_dmabuf_offset = 0;
-    fprintf(stderr, "[perftest-mem][cuda] alloc_buffer: stub ok (size=%lu)\n",
-            (unsigned long)size);
+    fprintf(stderr,
+            "[perftest-mem][cuda] alloc_buffer stub: size=%lu mode=%d (0=AUTO 1=DIRECT 2=PROXY 3=OFF)\n",
+            (unsigned long)size, (int)self->gdr_mode);
     return 0;
 }
 
@@ -187,6 +236,73 @@ static uint8_t cuda_read_byte(perftest_memory_ops_t *self, const void *addr,
     return 0;
 }
 
+static int cuda_negotiate(perftest_memory_ops_t *self, void *urma_dev_opaque)
+{
+    /*
+     * 这个函数是 GDR 框架的"决策点". 真实现里:
+     *
+     *   1) GPU 一侧 (CUDA) 必须能导出 dma-buf:
+     *        cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, dev);
+     *        if (!supported) -> can_direct = false;
+     *
+     *   2) URMA / NIC 一侧必须能 import dma-buf:
+     *        urma_dmabuf_caps_t caps;
+     *        urma_query_dmabuf_caps((urma_device_t *)urma_dev_opaque, &caps);
+     *        if (!caps.support_dmabuf) -> can_direct = false;
+     *
+     *   3) 决定模式:
+     *        - 用户显式 cfg->gdr_mode == DIRECT: 必须 can_direct, 否则 -1;
+     *        - 用户显式 cfg->gdr_mode == PROXY:  无条件走 PROXY;
+     *        - cfg->gdr_mode == AUTO:           can_direct ? DIRECT : PROXY.
+     *
+     *   4) 把结果写回 self->gdr_mode 让 alloc_buffer / stage_* 看到.
+     *
+     * 当前 stub 行为: 因为 urma_query_dmabuf_caps 已经返回 support=0
+     * (见 urma_seg_dmabuf.c stub), 这里就模拟 AUTO -> PROXY.
+     */
+    (void)urma_dev_opaque;
+    self->gdr_mode = PERFTEST_GDR_HOST_PROXY;
+    fprintf(stderr,
+            "[perftest-mem][cuda] negotiate: driver dma-buf NOT supported -> "
+            "host-proxy fallback (all data staged via cuMemcpyDtoH/HtoD)\n");
+    return 0;
+}
+
+static int cuda_stage_to_nic(perftest_memory_ops_t *self, void *shadow_addr,
+                             void *gpu_addr, size_t len)
+{
+    (void)shadow_addr; (void)gpu_addr;
+    /*
+     * PROXY 路径下, 在每次 post send 之前调.
+     *   真实现: cuMemcpyDtoH(shadow_addr, (CUdeviceptr)gpu_addr, len);
+     * DIRECT 模式下, NIC 直接读 GPU, 不调这个; 但即便误调也是 noop.
+     */
+    if (self->gdr_mode != PERFTEST_GDR_HOST_PROXY) {
+        return 0;
+    }
+    fprintf(stderr,
+            "[perftest-mem][cuda] stage_to_nic stub: would cuMemcpyDtoH(shadow,gpu,%zu)\n",
+            len);
+    return 0;
+}
+
+static int cuda_stage_from_nic(perftest_memory_ops_t *self, void *gpu_addr,
+                               void *shadow_addr, size_t len)
+{
+    (void)gpu_addr; (void)shadow_addr;
+    /*
+     * PROXY 路径下, 在每次 recv 完成后调.
+     *   真实现: cuMemcpyHtoD((CUdeviceptr)gpu_addr, shadow_addr, len);
+     */
+    if (self->gdr_mode != PERFTEST_GDR_HOST_PROXY) {
+        return 0;
+    }
+    fprintf(stderr,
+            "[perftest-mem][cuda] stage_from_nic stub: would cuMemcpyHtoD(gpu,shadow,%zu)\n",
+            len);
+    return 0;
+}
+
 perftest_memory_ops_t *perftest_cuda_mem_create(perftest_config_t *cfg)
 {
     (void)cfg;
@@ -202,6 +318,7 @@ perftest_memory_ops_t *perftest_cuda_mem_create(perftest_config_t *cfg)
     }
     /* TODO: 从 cfg 拷贝 gpu_id / use_dmabuf 等. */
     ops->type                  = PERFTEST_MEM_CUDA;
+    ops->gdr_mode              = PERFTEST_GDR_AUTO;   /* 等 negotiate 改写 */
     ops->priv                  = priv;
     ops->init                  = cuda_init;
     ops->destroy               = cuda_destroy;
@@ -212,6 +329,9 @@ perftest_memory_ops_t *perftest_cuda_mem_create(perftest_config_t *cfg)
     ops->copy_buffer_to_buffer = cuda_copy_b2b;
     ops->write_byte            = cuda_write_byte;
     ops->read_byte             = cuda_read_byte;
+    ops->negotiate_gdr_mode    = cuda_negotiate;
+    ops->stage_to_nic_buffer   = cuda_stage_to_nic;
+    ops->stage_from_nic_buffer = cuda_stage_from_nic;
     fprintf(stderr, "[perftest-mem][cuda] create: stub ok\n");
     return ops;
 }

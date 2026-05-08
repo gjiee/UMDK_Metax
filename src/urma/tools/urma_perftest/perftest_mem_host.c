@@ -133,6 +133,33 @@ static uint8_t host_read_byte(perftest_memory_ops_t *self, const void *addr,
     return 0;
 }
 
+static int host_negotiate(perftest_memory_ops_t *self, void *urma_dev_opaque)
+{
+    (void)urma_dev_opaque;
+    /*
+     * host 后端没有"GDR"可言, 永远是 OFF. 这里 print 一行让人在日志里
+     * 一眼看出当前模式.
+     */
+    self->gdr_mode = PERFTEST_GDR_OFF;
+    fprintf(stderr, "[perftest-mem][host] negotiate: gdr_mode = OFF (host only)\n");
+    return 0;
+}
+
+static int host_stage_to_nic(perftest_memory_ops_t *self, void *shadow_addr,
+                             void *gpu_addr, size_t len)
+{
+    (void)self; (void)shadow_addr; (void)gpu_addr; (void)len;
+    /* host 模式下 shadow == gpu_addr == 同一个 host buffer, 这个钩子是 noop. */
+    return 0;
+}
+
+static int host_stage_from_nic(perftest_memory_ops_t *self, void *gpu_addr,
+                               void *shadow_addr, size_t len)
+{
+    (void)self; (void)gpu_addr; (void)shadow_addr; (void)len;
+    return 0;
+}
+
 perftest_memory_ops_t *perftest_host_mem_create(perftest_config_t *cfg)
 {
     (void)cfg;
@@ -147,6 +174,7 @@ perftest_memory_ops_t *perftest_host_mem_create(perftest_config_t *cfg)
         return NULL;
     }
     ops->type                  = PERFTEST_MEM_HOST;
+    ops->gdr_mode              = PERFTEST_GDR_OFF;
     ops->init                  = host_init;
     ops->destroy               = host_destroy;
     ops->alloc_buffer          = host_alloc_buffer;
@@ -156,6 +184,9 @@ perftest_memory_ops_t *perftest_host_mem_create(perftest_config_t *cfg)
     ops->copy_buffer_to_buffer = host_copy_b2b;
     ops->write_byte            = host_write_byte;
     ops->read_byte             = host_read_byte;
+    ops->negotiate_gdr_mode    = host_negotiate;
+    ops->stage_to_nic_buffer   = host_stage_to_nic;
+    ops->stage_from_nic_buffer = host_stage_from_nic;
     fprintf(stderr, "[perftest-mem][host] create: stub ok\n");
     return ops;
 }

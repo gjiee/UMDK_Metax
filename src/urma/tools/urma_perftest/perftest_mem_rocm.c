@@ -126,6 +126,38 @@ static uint8_t rocm_read_byte(perftest_memory_ops_t *self, const void *addr,
     return 0;
 }
 
+static int rocm_negotiate(perftest_memory_ops_t *self, void *urma_dev_opaque)
+{
+    /* 同 cuda_negotiate 思路, 只是 GPU 一侧用 hipDeviceGetAttribute 探测. */
+    (void)urma_dev_opaque;
+    self->gdr_mode = PERFTEST_GDR_HOST_PROXY;
+    fprintf(stderr,
+            "[perftest-mem][rocm] negotiate: driver dma-buf NOT supported -> host-proxy\n");
+    return 0;
+}
+
+static int rocm_stage_to_nic(perftest_memory_ops_t *self, void *shadow_addr,
+                             void *gpu_addr, size_t len)
+{
+    (void)shadow_addr; (void)gpu_addr;
+    if (self->gdr_mode != PERFTEST_GDR_HOST_PROXY) return 0;
+    fprintf(stderr,
+            "[perftest-mem][rocm] stage_to_nic stub: would hipMemcpyDtoH(shadow,gpu,%zu)\n",
+            len);
+    return 0;
+}
+
+static int rocm_stage_from_nic(perftest_memory_ops_t *self, void *gpu_addr,
+                               void *shadow_addr, size_t len)
+{
+    (void)gpu_addr; (void)shadow_addr;
+    if (self->gdr_mode != PERFTEST_GDR_HOST_PROXY) return 0;
+    fprintf(stderr,
+            "[perftest-mem][rocm] stage_from_nic stub: would hipMemcpyHtoD(gpu,shadow,%zu)\n",
+            len);
+    return 0;
+}
+
 perftest_memory_ops_t *perftest_rocm_mem_create(perftest_config_t *cfg)
 {
     (void)cfg;
@@ -140,6 +172,7 @@ perftest_memory_ops_t *perftest_rocm_mem_create(perftest_config_t *cfg)
         return NULL;
     }
     ops->type                  = PERFTEST_MEM_ROCM;
+    ops->gdr_mode              = PERFTEST_GDR_AUTO;
     ops->priv                  = priv;
     ops->init                  = rocm_init;
     ops->destroy               = rocm_destroy;
@@ -150,6 +183,9 @@ perftest_memory_ops_t *perftest_rocm_mem_create(perftest_config_t *cfg)
     ops->copy_buffer_to_buffer = rocm_copy_b2b;
     ops->write_byte            = rocm_write_byte;
     ops->read_byte             = rocm_read_byte;
+    ops->negotiate_gdr_mode    = rocm_negotiate;
+    ops->stage_to_nic_buffer   = rocm_stage_to_nic;
+    ops->stage_from_nic_buffer = rocm_stage_from_nic;
     fprintf(stderr, "[perftest-mem][rocm] create: stub ok\n");
     return ops;
 }

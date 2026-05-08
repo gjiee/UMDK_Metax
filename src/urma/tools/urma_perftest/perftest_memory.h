@@ -73,6 +73,48 @@ typedef enum perftest_mem_type {
 } perftest_mem_type_t;
 
 /*
+ * 枚举: GDR 工作模式.
+ *
+ * 这是什么 (What):
+ *   配合 GPU 类后端 (CUDA / ROCm / DMABUF), 决定"NIC 怎么看到 GPU 数据".
+ *   两种主路径:
+ *
+ *     PERFTEST_GDR_DIRECT (真 GDR):
+ *         - GPU 用户态运行时 cuMemAlloc / hipMalloc 出来一段显存;
+ *         - 调用 cuMemGetHandleForAddressRange(... DMA_BUF_FD ...) 拿到 fd;
+ *         - 用户态 urma_register_seg_dmabuf(ctx, &cfg, fd, off);
+ *         - 内核 ubcore dma_buf_attach + map_attachment, NIC MAPT 直接指
+ *           向 GPU BAR1 物理地址;
+ *         - NIC <DMA> GPU, CPU 不参与数据搬运 -> 真正零拷贝.
+ *
+ *     PERFTEST_GDR_HOST_PROXY (主机代理, 当无 GDR 驱动时使用):
+ *         - GPU 仍然用 cuMemAlloc 拿到 d_ptr, 假装"数据在 GPU 上";
+ *         - 同时 cuMemAllocHost 一份等大 host pinned shadow;
+ *         - 用户态向 URMA 注册的是 host shadow (用普通 urma_register_seg,
+ *           不需要 GDR 驱动);
+ *         - 每次发送前: cuMemcpyDtoH(shadow, d_ptr, len) 把 GPU 数据"借
+ *           道"主机, 然后 NIC DMA shadow;
+ *         - 每次接收后: cuMemcpyHtoD(d_ptr, shadow, len) 把数据回灌 GPU.
+ *         - 即"主机做中转". 性能比 DIRECT 差一倍多, 但完全不依赖 dma-buf
+ *           内核驱动, 是 GDR 不可用环境下的可工作 baseline.
+ *
+ *   AUTO 与 OFF 是控制位, 不会真的成为 ops->gdr_mode:
+ *     AUTO -> 调 urma_query_dmabuf_caps, 设备支持就 DIRECT, 否则 PROXY;
+ *     OFF  -> 退化, 完全跑 host (像今天的 perftest 一样).
+ *
+ * 给内核老兵的提示:
+ *   把 PROXY 想成"NIC 没法直接 DMA 加速器内存, 我们用 host 内存做 bounce
+ *   buffer", 与你在 dma-mapping 子系统里看到的 swiotlb bounce 基本同构.
+ */
+typedef enum perftest_gdr_mode {
+    PERFTEST_GDR_AUTO       = 0,  /* 探测能力, 能 DIRECT 就 DIRECT, 否则 PROXY */
+    PERFTEST_GDR_DIRECT     = 1,  /* 强制 dma-buf 直传 GPU */
+    PERFTEST_GDR_HOST_PROXY = 2,  /* 强制走 host shadow */
+    PERFTEST_GDR_OFF        = 3,  /* 完全退化为 host 模式 */
+    PERFTEST_GDR_MODE_MAX
+} perftest_gdr_mode_t;
+
+/*
  * 主结构体: 内存后端 ops 表.
  *
  * 解释 (What):
@@ -151,9 +193,50 @@ typedef struct perftest_memory_ops {
     uint8_t (*read_byte)(struct perftest_memory_ops *self, const void *addr,
                          uint64_t off);
 
+    /*
+     * negotiate_gdr_mode:
+     *   当 cfg->gdr_mode == PERFTEST_GDR_AUTO 时, init() 之后由主程序调一次,
+     *   后端内部:
+     *     1) 调用 urma_query_dmabuf_caps(dev, &caps) 看 NIC + 内核侧能力;
+     *     2) 看 GPU 运行时能不能导出 dma-buf (cuda: driver_version >= 12.2,
+     *        rocm: hsa_amd_portable_export_dmabuf 可用);
+     *     3) 两端都 OK -> self->gdr_mode = PERFTEST_GDR_DIRECT;
+     *     4) 否则 -> self->gdr_mode = PERFTEST_GDR_HOST_PROXY, 同时打印
+     *        "GDR not available on this device, falling back to host-proxy".
+     *
+     *   返回 0 = 成功, 协商完毕 self->gdr_mode 已写好;
+     *   返回 -1 = 致命错误 (例如 cfg 强制 DIRECT 但驱动不支持).
+     *
+     *   host 后端没有"GDR"概念, 直接返回 0, gdr_mode 留 OFF.
+     */
+    int  (*negotiate_gdr_mode)(struct perftest_memory_ops *self, void *urma_dev_opaque);
+
+    /*
+     * stage_to_nic_buffer / stage_from_nic_buffer:
+     *   这两个钩子专门为 PROXY 模式设计, DIRECT/host 模式下是 noop.
+     *
+     *   stage_to_nic_buffer: 在每次 post_jfs_wr 前调用一次, 用来:
+     *       cuMemcpyDtoH(shadow_addr, gpu_addr, len);  // 把 GPU 数据先拷到 NIC 看得见的 host shadow
+     *
+     *   stage_from_nic_buffer: 在每次 recv 完成后调用, 用来:
+     *       cuMemcpyHtoD(gpu_addr, shadow_addr, len);  // 把 NIC 收到的数据回灌 GPU
+     *
+     *   两个 hook 的入参语义: shadow_addr 是 ops->alloc_buffer 返回的 out_addr
+     *   (它就是 URMA 注册的那段地址), gpu_addr 是后端内部保存的 GPU 设备指针
+     *   (PROXY 模式下从 priv->gpu_ptr 拿).
+     *
+     *   这是真正能让"无 GDR 驱动也跑 GPU 数据"的关键入口. 它把"GPU<->NIC"的
+     *   语义装到了 perftest 的 IO 路径里, 上层不需要再分 if/else.
+     */
+    int  (*stage_to_nic_buffer)(struct perftest_memory_ops *self,
+                                void *shadow_addr, void *gpu_addr, size_t len);
+    int  (*stage_from_nic_buffer)(struct perftest_memory_ops *self,
+                                  void *gpu_addr, void *shadow_addr, size_t len);
+
     /* 后端类型与私有数据 (实现里强转为自己的 ctx). */
-    perftest_mem_type_t type;
-    void               *priv;
+    perftest_mem_type_t  type;
+    perftest_gdr_mode_t  gdr_mode;   /* 由 negotiate_gdr_mode() 写入 */
+    void                *priv;
 } perftest_memory_ops_t;
 
 /*
