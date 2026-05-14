@@ -46,7 +46,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>     /* close() */
 
+#include "perftest_cuda_loader.h"
 #include "perftest_gpu_alloc.h"
 
 #define GA_LOG(fmt, ...) \
@@ -54,6 +56,41 @@
 
 /* 强制失败位掩码, 仅供测试. 默认 0. */
 static unsigned g_force_fail_mask = 0;
+
+/* --gpu-mode 选择的入口策略. 默认 NONE = 直接 memalign. */
+static perftest_gpu_mode_t g_gpu_mode = PERFTEST_GPU_MODE_NONE;
+
+void perftest_gpu_set_mode(perftest_gpu_mode_t m)
+{
+    g_gpu_mode = m;
+    GA_LOG("mode = %s", perftest_gpu_mode_name(m));
+}
+
+perftest_gpu_mode_t perftest_gpu_get_mode(void)
+{
+    return g_gpu_mode;
+}
+
+const char *perftest_gpu_mode_name(perftest_gpu_mode_t m)
+{
+    switch (m) {
+        case PERFTEST_GPU_MODE_NONE:    return "none";
+        case PERFTEST_GPU_MODE_PROXY:   return "proxy";
+        case PERFTEST_GPU_MODE_PEERMEM: return "peermem";
+        case PERFTEST_GPU_MODE_DIRECT:  return "direct";
+        default:                        return "?";
+    }
+}
+
+int perftest_gpu_mode_from_string(const char *s, perftest_gpu_mode_t *out)
+{
+    if (s == NULL || out == NULL) return -1;
+    if (strcmp(s, "none")    == 0) { *out = PERFTEST_GPU_MODE_NONE;    return 0; }
+    if (strcmp(s, "proxy")   == 0) { *out = PERFTEST_GPU_MODE_PROXY;   return 0; }
+    if (strcmp(s, "peermem") == 0) { *out = PERFTEST_GPU_MODE_PEERMEM; return 0; }
+    if (strcmp(s, "direct")  == 0) { *out = PERFTEST_GPU_MODE_DIRECT;  return 0; }
+    return -1;
+}
 
 void perftest_gpu_alloc_set_force_fail_mask(unsigned mask)
 {
@@ -93,7 +130,11 @@ const char *perftest_gpu_alloc_strategy_name(perftest_gpu_alloc_strategy_t s)
 static int try_alloc_gdr(size_t size, size_t alignment,
                          perftest_gpu_buffer_t *out)
 {
-    (void)size; (void)alignment; (void)out;
+    void    *dptr = NULL;
+    int      fd   = -1;
+    uint64_t off  = 0;
+
+    (void)alignment;
 
     if (forced_fail(PERFTEST_GPU_ALLOC_GDR)) {
         GA_LOG("forced fail by test mask");
@@ -101,16 +142,42 @@ static int try_alloc_gdr(size_t size, size_t alignment,
     }
 
     /*
-     * 真实现要点:
-     *   1) dlopen("libcuda.so.1"); 取 cuMemAlloc / cuMemGetHandleForAddressRange;
-     *   2) 调用 urma_register_seg_dmabuf(); 若返回非 NULL -> 填 out, ret 0;
-     *
-     * 当前 urma_register_seg_dmabuf 总返回 NULL+EOPNOTSUPP (见
-     * urma_seg_dmabuf.c BYPASS 注释), 所以这条路径必然走不通.
+     * 路径: cuMemAlloc + cuMemGetHandleForAddressRange(DMA_BUF_FD).
+     * 注意: 即便这里成功拿到 fd, 真正"NIC 直 DMA GPU"还要 ubcore + udma
+     * 端的 dma_buf_attach 落地, 当前 urma_register_seg_dmabuf 是显式 BYPASS,
+     * 所以上层 register_seg_dmabuf 调用必然返回 EOPNOTSUPP. 这里依然把
+     * GPU 内存 + fd 申请出来, 让 caller 真正去试一遍 -- caller 拿到 fd 调
+     * register_seg_dmabuf 之后再决定走 fallback.
      */
-    GA_LOG("FAIL: kernel dma-buf path not wired "
-           "(urma_register_seg_dmabuf -> EOPNOTSUPP, bypass mode)");
-    return -1;
+    if (perftest_cuda_loader_init() != 0) {
+        GA_LOG("FAIL: libcuda not available");
+        return -1;
+    }
+    if (perftest_cuda_ctx_create(0) != 0) {
+        GA_LOG("FAIL: cuCtxCreate");
+        return -1;
+    }
+    if (perftest_cuda_mem_alloc(size, &dptr) != 0) {
+        GA_LOG("FAIL: cuMemAlloc");
+        return -1;
+    }
+    if (perftest_cuda_get_dmabuf_fd(dptr, size, &fd, &off) != 0) {
+        GA_LOG("FAIL: cuMemGetHandleForAddressRange (CUDA < 12.2?)");
+        perftest_cuda_mem_free(dptr);
+        return -1;
+    }
+
+    out->addr          = dptr;        /* register_seg_dmabuf 用 dptr 当 va */
+    out->gpu_ptr       = dptr;
+    out->size          = size;
+    out->dmabuf_fd     = fd;
+    out->dmabuf_offset = off;
+    out->strategy      = PERFTEST_GPU_ALLOC_GDR;
+
+    GA_LOG("OK: dptr=%p fd=%d offset=%lu size=%zu  (caller still needs "
+           "urma_register_seg_dmabuf to succeed; otherwise fallback peermem/proxy)",
+           dptr, fd, (unsigned long)off, size);
+    return 0;
 }
 
 /* ===========================================================================
@@ -145,37 +212,49 @@ static int has_kernel_module(const char *name)
 static int try_alloc_peermem(size_t size, size_t alignment,
                              perftest_gpu_buffer_t *out)
 {
-    void *libcuda = NULL;
-    (void)size; (void)alignment; (void)out;
+    void *dptr = NULL;
+    (void)alignment;
 
     if (forced_fail(PERFTEST_GPU_ALLOC_PEERMEM)) {
         GA_LOG("forced fail by test mask");
         return -1;
     }
 
-    libcuda = dlopen("libcuda.so.1", RTLD_LAZY);
-    if (libcuda == NULL) {
-        GA_LOG("FAIL: libcuda.so.1 not present (%s)", dlerror());
+    if (perftest_cuda_loader_init() != 0) {
+        GA_LOG("FAIL: libcuda.so.1 not present");
         return -1;
     }
     /*
-     * 即使 libcuda 在, 还要看 nvidia_peermem 内核模块. ubcore 通过
-     * peer_memory_client 注册回调, 没装这个模块就算 cuMemAlloc 出来也
-     * 没法被 NIC 直接 DMA.
+     * peer_memory_client (nvidia_peermem / amd_peermem) 是内核侧的回调注册,
+     * ubcore 通过它从 GPU driver 拿物理页表. 若没装这个模块就算 cuMemAlloc
+     * 出来 NIC 也看不到 GPU 物理页 -> register_seg 会失败.
      */
     if (!has_kernel_module("nvidia_peermem") &&
         !has_kernel_module("amd_peermem")) {
-        GA_LOG("FAIL: no peer-mem kernel module loaded (nvidia_peermem / amd_peermem)");
-        dlclose(libcuda);
+        GA_LOG("FAIL: no peer-mem kernel module loaded "
+               "(modprobe nvidia_peermem  -- or amd_peermem on ROCm)");
         return -1;
     }
-    /*
-     * 真实现这里 cuMemAlloc + urma_register_seg(va=cu_ptr). 当前骨架
-     * 没必要拉 cuda.h, 直接报"探测到但暂未实现", 让 fallback 继续走.
-     */
-    GA_LOG("FAIL: peer-mem detected but cuMemAlloc wiring not implemented in skeleton");
-    dlclose(libcuda);
-    return -1;
+    if (perftest_cuda_ctx_create(0) != 0) {
+        GA_LOG("FAIL: cuCtxCreate");
+        return -1;
+    }
+    if (perftest_cuda_mem_alloc(size, &dptr) != 0) {
+        GA_LOG("FAIL: cuMemAlloc");
+        return -1;
+    }
+
+    out->addr          = dptr;     /* URMA register_seg 直接把 dptr 当 va */
+    out->gpu_ptr       = dptr;
+    out->size          = size;
+    out->dmabuf_fd     = -1;
+    out->dmabuf_offset = 0;
+    out->strategy      = PERFTEST_GPU_ALLOC_PEERMEM;
+
+    GA_LOG("OK: dptr=%p size=%zu (URMA register_seg sees GPU va; "
+           "kernel ubcore pulls page list via peer_memory_client)",
+           dptr, size);
+    return 0;
 }
 
 /* ===========================================================================
@@ -199,52 +278,64 @@ static int try_alloc_peermem(size_t size, size_t alignment,
 static int try_alloc_host_proxy(size_t size, size_t alignment,
                                 perftest_gpu_buffer_t *out)
 {
-    void *libcuda;
+    void       *gpu_ptr = NULL;
+    void       *shadow  = NULL;
     const char *sim;
+    int         have_cuda;
 
     if (forced_fail(PERFTEST_GPU_ALLOC_HOST_PROXY)) {
         GA_LOG("forced fail by test mask");
         return -1;
     }
 
-    libcuda = dlopen("libcuda.so.1", RTLD_LAZY);
-    sim = getenv("PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM");
+    have_cuda = (perftest_cuda_loader_init() == 0);
+    sim       = getenv("PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM");
 
-    if (libcuda == NULL && (sim == NULL || strcmp(sim, "1") != 0)) {
-        GA_LOG("FAIL: libcuda.so.1 not present and PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM!=1");
+    if (!have_cuda && (sim == NULL || strcmp(sim, "1") != 0)) {
+        GA_LOG("FAIL: libcuda.so.1 not present "
+               "and PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM!=1");
         return -1;
     }
-    if (libcuda) {
-        /*
-         * 真实现这里 cuMemAlloc(&gpu_ptr, size). 当前骨架不强行拉 cuda.h,
-         * 这里以 memalign 模拟 GPU buffer (=与上一轮 perftest_mem_gpu_proxy
-         * 行为一致). 单独再 memalign 一份 host shadow.
-         */
-        GA_LOG("libcuda present but skeleton uses memalign-sim for GPU; "
-               "real build will replace this with cuMemAlloc");
+
+    if (have_cuda) {
+        /* 真实 GPU + pinned shadow, 与 linux-rdma cuda_memory.c 同构. */
+        if (perftest_cuda_ctx_create(0) != 0) {
+            GA_LOG("FAIL: cuCtxCreate");
+            return -1;
+        }
+        if (perftest_cuda_mem_alloc(size, &gpu_ptr) != 0) {
+            GA_LOG("FAIL: cuMemAlloc");
+            return -1;
+        }
+        if (perftest_cuda_mem_alloc_host(size, &shadow) != 0) {
+            GA_LOG("FAIL: cuMemAllocHost");
+            perftest_cuda_mem_free(gpu_ptr);
+            return -1;
+        }
     } else {
-        GA_LOG("simulation mode requested (no libcuda)");
+        /* sim 模式: 没装 CUDA 时仍能跑业务逻辑, GPU 与 shadow 都用 memalign. */
+        GA_LOG("simulation mode: using memalign for both gpu_ptr and shadow");
+        gpu_ptr = memalign(alignment, size);
+        shadow  = memalign(alignment, size);
+        if (gpu_ptr == NULL || shadow == NULL) {
+            free(gpu_ptr); free(shadow);
+            GA_LOG("FAIL: ENOMEM");
+            return -1;
+        }
+        memset(gpu_ptr, 0, size);
+        memset(shadow,  0, size);
     }
 
-    out->gpu_ptr = memalign(alignment, size);
-    out->addr    = memalign(alignment, size);  /* host shadow */
-    if (out->gpu_ptr == NULL || out->addr == NULL) {
-        free(out->gpu_ptr); out->gpu_ptr = NULL;
-        free(out->addr);    out->addr    = NULL;
-        if (libcuda) dlclose(libcuda);
-        GA_LOG("FAIL: ENOMEM");
-        return -1;
-    }
-    memset(out->gpu_ptr, 0, size);
-    memset(out->addr,    0, size);
+    out->addr          = shadow;          /* URMA register_seg 注册 shadow */
+    out->gpu_ptr       = gpu_ptr;
     out->size          = size;
-    out->dmabuf_fd     = -1;     /* host-proxy 不走 dma-buf */
+    out->dmabuf_fd     = -1;
     out->dmabuf_offset = 0;
     out->strategy      = PERFTEST_GPU_ALLOC_HOST_PROXY;
 
-    GA_LOG("OK: gpu_ptr=%p shadow=%p size=%zu (URMA registers shadow)",
-           out->gpu_ptr, out->addr, size);
-    if (libcuda) dlclose(libcuda);
+    GA_LOG("OK: gpu_ptr=%p shadow=%p size=%zu have_cuda=%d "
+           "(URMA registers shadow; use stage_to_nic / stage_from_nic for D2H/H2D)",
+           gpu_ptr, shadow, size, have_cuda);
     return 0;
 }
 
@@ -276,7 +367,17 @@ static int try_alloc_memalign(size_t size, size_t alignment,
 }
 
 /* ===========================================================================
- * 公共入口
+ * 公共入口: 按 g_gpu_mode (--gpu-mode CLI) 决定从哪一档进入. 任何一档失败
+ * 都最终 fallback 到 memalign, 保证 perftest 永远能继续跑.
+ *
+ *   NONE    : 直接 memalign, 不 touch GPU 任何东西;
+ *   DIRECT  : try_alloc_gdr        -> fallback memalign;
+ *   PEERMEM : try_alloc_peermem    -> fallback memalign;
+ *   PROXY   : try_alloc_host_proxy -> fallback memalign.
+ *
+ * NOTE: 以前 (上一轮) 是无条件 GDR->peermem->proxy->memalign 全链尝试;
+ *       本轮按 CLI 显式选, 改成"按 mode 选一档 + fallback". 默认 NONE 行为
+ *       与原 read_lat / write_lat 完全一致.
  * =========================================================================== */
 int perftest_gpu_alloc_buffer(size_t size, size_t alignment,
                               perftest_gpu_buffer_t *out)
@@ -291,28 +392,108 @@ int perftest_gpu_alloc_buffer(size_t size, size_t alignment,
     }
     memset(out, 0, sizeof(*out));
 
-    GA_LOG("requested size=%zu align=%zu force_fail_mask=0x%x",
-           size, alignment, g_force_fail_mask);
+    GA_LOG("requested size=%zu align=%zu mode=%s force_fail_mask=0x%x",
+           size, alignment, perftest_gpu_mode_name(g_gpu_mode), g_force_fail_mask);
 
-    if (try_alloc_gdr(size, alignment, out) == 0) {
-        GA_LOG("DONE via %s", perftest_gpu_alloc_strategy_name(out->strategy));
-        return 0;
+    switch (g_gpu_mode) {
+        case PERFTEST_GPU_MODE_DIRECT:
+            if (try_alloc_gdr(size, alignment, out) == 0) {
+                GA_LOG("DONE via %s",
+                       perftest_gpu_alloc_strategy_name(out->strategy));
+                return 0;
+            }
+            GA_LOG("mode=direct failed, fallback to memalign");
+            break;
+        case PERFTEST_GPU_MODE_PEERMEM:
+            if (try_alloc_peermem(size, alignment, out) == 0) {
+                GA_LOG("DONE via %s",
+                       perftest_gpu_alloc_strategy_name(out->strategy));
+                return 0;
+            }
+            GA_LOG("mode=peermem failed, fallback to memalign");
+            break;
+        case PERFTEST_GPU_MODE_PROXY:
+            if (try_alloc_host_proxy(size, alignment, out) == 0) {
+                GA_LOG("DONE via %s",
+                       perftest_gpu_alloc_strategy_name(out->strategy));
+                return 0;
+            }
+            GA_LOG("mode=proxy failed, fallback to memalign");
+            break;
+        case PERFTEST_GPU_MODE_NONE:
+        default:
+            /* 不进 GPU 链, 直接 memalign. */
+            break;
     }
-    if (try_alloc_peermem(size, alignment, out) == 0) {
-        GA_LOG("DONE via %s", perftest_gpu_alloc_strategy_name(out->strategy));
-        return 0;
-    }
-    if (try_alloc_host_proxy(size, alignment, out) == 0) {
-        GA_LOG("DONE via %s", perftest_gpu_alloc_strategy_name(out->strategy));
-        return 0;
-    }
+
     if (try_alloc_memalign(size, alignment, out) == 0) {
         GA_LOG("DONE via %s", perftest_gpu_alloc_strategy_name(out->strategy));
         return 0;
     }
 
-    GA_LOG("FATAL: all 4 strategies failed (likely OOM)");
+    GA_LOG("FATAL: even memalign failed (OOM)");
     return -1;
+}
+
+/* ===========================================================================
+ * stage_to_nic_buffer / stage_from_nic_buffer
+ *
+ * 调用时机:
+ *   - perftest IO 主循环里, 在 post_jfs_wr / post_jfr_wr 之前调
+ *     perftest_gpu_stage_to_nic, 把 GPU device buffer 的内容拷到 host
+ *     shadow (URMA 注册的是 shadow);
+ *   - 收到 CR 之后调 perftest_gpu_stage_from_nic, 把 NIC 写到 shadow 的
+ *     数据回灌 GPU device buffer.
+ *
+ * 行为按 buf->strategy 分流:
+ *   HOST_PROXY: 真做 cuMemcpyDtoH / cuMemcpyHtoD (没装 CUDA 时退化为 memcpy);
+ *   PEERMEM   : NIC 已经直接 DMA GPU, 此处 noop;
+ *   GDR       : 同上, NIC 直 DMA GPU, noop;
+ *   MEMALIGN  : 纯 host 路径, noop.
+ *
+ * 由 caller 在合适的地方调用. 我们 *不* 在 register_mem / run_*_lat 里
+ * 自动插入 (那会动主循环, 与"最小代码原则"冲突), 而是把 API 暴露出去,
+ * 让后续真接 CUDA 的 patch 选择哪个粒度调用.
+ * =========================================================================== */
+int perftest_gpu_stage_to_nic(perftest_gpu_buffer_t *buf, size_t len)
+{
+    if (buf == NULL || buf->size == 0 || len > buf->size) {
+        GA_LOG("invalid arg buf=%p len=%zu", (void *)buf, len);
+        return -1;
+    }
+    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY) {
+        return 0; /* DIRECT/PEERMEM/MEMALIGN 不需要 stage */
+    }
+    if (buf->gpu_ptr == NULL || buf->addr == NULL) {
+        GA_LOG("FAIL: HOST_PROXY but gpu_ptr/shadow missing");
+        return -1;
+    }
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_d2h(buf->addr, buf->gpu_ptr, len);
+    }
+    /* sim 模式: GPU 也是 host memory, 用普通 memcpy 等价. */
+    memcpy(buf->addr, buf->gpu_ptr, len);
+    return 0;
+}
+
+int perftest_gpu_stage_from_nic(perftest_gpu_buffer_t *buf, size_t len)
+{
+    if (buf == NULL || buf->size == 0 || len > buf->size) {
+        GA_LOG("invalid arg buf=%p len=%zu", (void *)buf, len);
+        return -1;
+    }
+    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY) {
+        return 0;
+    }
+    if (buf->gpu_ptr == NULL || buf->addr == NULL) {
+        GA_LOG("FAIL: HOST_PROXY but gpu_ptr/shadow missing");
+        return -1;
+    }
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_h2d(buf->gpu_ptr, buf->addr, len);
+    }
+    memcpy(buf->gpu_ptr, buf->addr, len);
+    return 0;
 }
 
 void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
@@ -325,20 +506,33 @@ void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
 
     switch (buf->strategy) {
         case PERFTEST_GPU_ALLOC_GDR:
-            /* 真实现: close(buf->dmabuf_fd); cuMemFree(buf->addr); */
             if (buf->dmabuf_fd >= 0) {
-                /* 占位 */
+                /*
+                 * dma-buf fd 是 cuMemGetHandleForAddressRange 出的;
+                 * caller 用完后 close() 它. CUDA 持有的内部引用在 cuMemFree
+                 * 时释放, 所以两者顺序无关紧要.
+                 */
+                close(buf->dmabuf_fd);
             }
-            free(buf->addr);
+            if (perftest_cuda_is_loaded()) {
+                perftest_cuda_mem_free(buf->gpu_ptr);
+            }
             break;
         case PERFTEST_GPU_ALLOC_PEERMEM:
-            /* 真实现: cuMemFree(buf->addr); */
-            free(buf->addr);
+            if (perftest_cuda_is_loaded()) {
+                perftest_cuda_mem_free(buf->gpu_ptr);
+            }
             break;
         case PERFTEST_GPU_ALLOC_HOST_PROXY:
-            /* 真实现 GPU 端 cuMemFree(buf->gpu_ptr); */
-            free(buf->gpu_ptr);
-            free(buf->addr);
+            if (perftest_cuda_is_loaded()) {
+                /* 真 CUDA 路径: GPU 用 cuMemFree, shadow 用 cuMemFreeHost. */
+                perftest_cuda_mem_free(buf->gpu_ptr);
+                perftest_cuda_mem_free_host(buf->addr);
+            } else {
+                /* sim 路径: 两边都是 memalign. */
+                free(buf->gpu_ptr);
+                free(buf->addr);
+            }
             break;
         case PERFTEST_GPU_ALLOC_MEMALIGN:
             free(buf->addr);

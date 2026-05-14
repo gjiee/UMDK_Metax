@@ -39,6 +39,34 @@
 extern "C" {
 #endif
 
+/*
+ * 新增: --gpu-mode CLI 选项的语义.
+ *
+ *   NONE    -- 默认值, 不加 --gpu-mode 时使用. 直接走 memalign, 完全不
+ *              touch GPU / dma-buf / peermem / libcuda. 与原 read_lat /
+ *              write_lat 行为一致.
+ *   PROXY   -- 主机分配 shadow (pinned host) + GPU 分配 device buffer,
+ *              URMA 注册 shadow, 每次 IO 之前/之后通过 cuMemcpyDtoH/HtoD
+ *              做 staging (linux-rdma 风格 "host proxy"). 不需要内核
+ *              GDR / peermem 驱动. cfg->gpu_mode 为该值时, register_mem
+ *              内部调 perftest_gpu_alloc_buffer 即可.
+ *   PEERMEM -- 直接 cuMemAlloc, 把 GPU 设备指针交给 URMA register_seg;
+ *              内核侧需要 nvidia_peermem.ko (或 amd_peermem) 已 modprobe,
+ *              ubcore 通过 peer_memory_client 拿 GPU 页表.
+ *   DIRECT  -- cuMemAlloc + cuMemGetHandleForAddressRange(DMA_BUF_FD),
+ *              交给 urma_register_seg_dmabuf. 需要 CUDA Driver >= 12.2 与
+ *              ubcore + udma 已支持 dma_buf_attach.
+ *
+ *   每个值对应 perftest_gpu_alloc_strategy_t 中一档. PROXY 选定时仍允许
+ *   失败 fallback 到 memalign (libcuda 不在的情况); PEERMEM / DIRECT 同理.
+ */
+typedef enum perftest_gpu_mode {
+    PERFTEST_GPU_MODE_NONE    = 0,
+    PERFTEST_GPU_MODE_PROXY   = 1,
+    PERFTEST_GPU_MODE_PEERMEM = 2,
+    PERFTEST_GPU_MODE_DIRECT  = 3,
+} perftest_gpu_mode_t;
+
 /* 分配策略, 与上面的 4 步一一对应. */
 typedef enum perftest_gpu_alloc_strategy {
     PERFTEST_GPU_ALLOC_NONE       = 0,   /* 还未尝试 / 失败 */
@@ -69,6 +97,32 @@ typedef struct perftest_gpu_buffer {
 int  perftest_gpu_alloc_buffer(size_t size, size_t alignment,
                                perftest_gpu_buffer_t *out);
 void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf);
+
+/*
+ * 选择由 CLI --gpu-mode 决定的入口策略. 在 register_mem 调
+ * perftest_gpu_alloc_buffer *之前* 设置一次. 不调 = NONE = 默认 memalign.
+ *
+ *   NONE   : 不调 GPU 路径, 直接 memalign;
+ *   PROXY  : 先试 try_alloc_host_proxy, 失败 fallback memalign;
+ *   PEERMEM: 先试 try_alloc_peermem,   失败 fallback memalign;
+ *   DIRECT : 先试 try_alloc_gdr,       失败 fallback memalign.
+ */
+void                perftest_gpu_set_mode(perftest_gpu_mode_t m);
+perftest_gpu_mode_t perftest_gpu_get_mode(void);
+const char         *perftest_gpu_mode_name(perftest_gpu_mode_t m);
+
+/* 把 string ("proxy" / "peermem" / "direct") 解析成 mode.
+ * 失败返回 -1, 成功返回 0, 通过 out 写值. CLI 解析使用. */
+int                 perftest_gpu_mode_from_string(const char *s,
+                                                  perftest_gpu_mode_t *out);
+
+/*
+ * D2H / H2D staging helpers, --gpu-mode=proxy 下用. 由 caller 在每次
+ * post_jfs_wr 前 / poll_jfc 后调一次. 对 GPU mode = NONE / PEERMEM / DIRECT
+ * 这条函数是 noop. 内部会判 buf->strategy.
+ */
+int  perftest_gpu_stage_to_nic  (struct perftest_gpu_buffer *buf, size_t len);
+int  perftest_gpu_stage_from_nic(struct perftest_gpu_buffer *buf, size_t len);
 
 /* 给 print / 报告用的策略名. */
 const char *perftest_gpu_alloc_strategy_name(perftest_gpu_alloc_strategy_t s);
