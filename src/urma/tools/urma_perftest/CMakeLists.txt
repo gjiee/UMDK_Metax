@@ -20,10 +20,15 @@ add_executable(urma_perftest
     perftest_mem_rocm.c
     perftest_mem_dmabuf.c
     perftest_mem_gpu_proxy.c
-    # GPU allocator with automatic fallback (GDR -> peermem -> host-proxy ->
-    # memalign), used by the new read_lat_gpu / write_lat_gpu test commands.
-    # API is in perftest_gpu_alloc.h; see docs/urma_gpu_alloc_fallback.md.
+    # GPU allocator dispatched by CLI --gpu-mode={proxy|peermem|direct}.
+    # Each mode tries its own path and falls back to memalign on failure.
+    # API:        perftest_gpu_alloc.h          (set_mode / alloc / free / stage_*)
+    # CUDA glue:  perftest_cuda_loader.h        (dlopen libcuda.so.1)
+    # Validation: perftest_validation.h         (linux-rdma-style fill / check)
+    # See docs/urma_gpu_mode_cli.md for env setup tutorial.
     perftest_gpu_alloc.c
+    perftest_cuda_loader.c
+    perftest_validation.c
 )
 
 set_target_properties(urma_perftest
@@ -41,6 +46,11 @@ target_include_directories(urma_perftest
 target_link_libraries(urma_perftest
     PRIVATE
         urma pthread m
+        # -ldl is required by perftest_cuda_loader.c (dlopen libcuda.so.1).
+        # libcuda itself is *not* linked here; the runtime dlopen lets the
+        # binary work on machines without CUDA installed (only --gpu-mode
+        # paths that need CUDA will then fall back to memalign).
+        dl
 )
 
 install(TARGETS urma_perftest

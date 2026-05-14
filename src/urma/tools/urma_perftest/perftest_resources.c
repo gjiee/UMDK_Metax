@@ -828,9 +828,16 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
             }
             g_perftest_gpu_bufs_n = cfg->jettys;
         }
+        /*
+         * 让 perftest_gpu_alloc_buffer 知道 CLI --gpu-mode 选了哪个入口.
+         * NONE = 直接 memalign; PROXY/PEERMEM/DIRECT = 尝试该路径, 失败再
+         * fallback memalign. 详见 perftest_gpu_alloc.h 注释.
+         */
+        perftest_gpu_set_mode((perftest_gpu_mode_t)cfg->gpu_mode);
         (void)fprintf(stderr,
-            "%s: GPU variant cmd=%d, dispatching to perftest_gpu_alloc_buffer "
-            "(GDR -> peermem -> host-proxy -> memalign)\n", __func__, (int)cfg->cmd);
+            "%s: GPU variant cmd=%d gpu-mode=%s -> perftest_gpu_alloc_buffer\n",
+            __func__, (int)cfg->cmd,
+            perftest_gpu_mode_name((perftest_gpu_mode_t)cfg->gpu_mode));
     }
 
     for (i = 0; i < cfg->jettys; i++) {

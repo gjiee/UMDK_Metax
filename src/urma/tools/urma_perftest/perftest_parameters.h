@@ -240,6 +240,13 @@ enum perftest_opts {
     PERFTEST_OPT_BIND_IP,
     PERFTEST_OPT_AGGR_MODE,
     PERFTEST_OPT_STDOUT,
+    /*
+     * 新增: --gpu-mode={proxy,peermem,direct}
+     *   选定 GPU 内存分配的入口策略, 默认 (不加该选项) = memalign.
+     *   见 perftest_gpu_alloc.h::perftest_gpu_mode_t 与
+     *   docs/urma_gpu_mode_cli.md.
+     */
+    PERFTEST_OPT_GPU_MODE,
 };
 
 typedef enum perftest_rate_limiter_units {
@@ -369,6 +376,12 @@ typedef struct perftest_config {
     bool uboe_dscp;
     uint8_t sl;
     bool uboe_sl;
+
+    /*
+     * GPU 内存模式 (来自 CLI --gpu-mode). 默认 0 (= PERFTEST_GPU_MODE_NONE),
+     * register_mem 走老路径 memalign. 见 perftest_gpu_alloc.h.
+     */
+    int      gpu_mode;       /* enum perftest_gpu_mode_t 值, 用 int 避免循环 include */
 } perftest_config_t;
 
 typedef struct perftest_value_range {
