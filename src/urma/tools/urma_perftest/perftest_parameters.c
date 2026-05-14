@@ -68,7 +68,14 @@ static const perftest_cmd_t g_cmd[] = {
     { "read_bw",           PERFTEST_READ_BW },
     { "write_bw",          PERFTEST_WRITE_BW },
     { "send_bw",           PERFTEST_SEND_BW },
-    { "atomic_bw",         PERFTEST_ATOMIC_BW }
+    { "atomic_bw",         PERFTEST_ATOMIC_BW },
+    /*
+     * 与 read_lat / write_lat 完全一致, 只是 register_mem 时走 GPU 自动
+     * 回退分配链 (GDR -> peermem -> host-proxy -> memalign). 见
+     * perftest_gpu_alloc.[ch] 与 docs/urma_gpu_alloc_fallback.md.
+     */
+    { "read_lat_gpu",      PERFTEST_READ_LAT_GPU },
+    { "write_lat_gpu",     PERFTEST_WRITE_LAT_GPU }
 };
 
 static void command_usage(const char *argv0)
@@ -84,6 +91,10 @@ static void command_usage(const char *argv0)
     (void)printf("  write_bw                    Test for write bandwidth.\n");
     (void)printf("  send_bw                     Test for send bandwidth.\n");
     (void)printf("  atomic_bw                   Test for atomic bandwidth.\n");
+    (void)printf("  read_lat_gpu                Same as read_lat,  but allocate GPU memory via\n");
+    (void)printf("                              GDR -> peermem -> host-proxy -> memalign chain.\n");
+    (void)printf("  write_lat_gpu               Same as write_lat, but allocate GPU memory via\n");
+    (void)printf("                              GDR -> peermem -> host-proxy -> memalign chain.\n");
 }
 
 static void usage(const char *argv0)
@@ -201,10 +212,12 @@ static void init_cfg_api_type(perftest_config_t *cfg)
     switch (cfg->cmd) {
         case PERFTEST_READ_LAT:
         case PERFTEST_READ_BW:
+        case PERFTEST_READ_LAT_GPU:    /* GPU 变种, api_type 与 READ 完全一致 */
             cfg->api_type = PERFTEST_READ;
             break;
         case PERFTEST_WRITE_LAT:
         case PERFTEST_WRITE_BW:
+        case PERFTEST_WRITE_LAT_GPU:   /* GPU 变种, api_type 与 WRITE 完全一致 */
             cfg->api_type = PERFTEST_WRITE;
             break;
         case PERFTEST_SEND_LAT:
@@ -261,7 +274,21 @@ static void init_cfg(perftest_config_t *cfg)
     if (cfg == NULL) {
         return;
     }
-    cfg->type = cfg->cmd > PERFTEST_ATOMIC_LAT ? PERFTEST_BW : PERFTEST_LAT;
+    /*
+     * 注: PERFTEST_*_LAT_GPU 是新增的 LAT 变种, 枚举值排在 PERFTEST_ATOMIC_BW
+     * 之后, 不能再用旧的 ">PERFTEST_ATOMIC_LAT == BW" 判断, 这里显式列出.
+     */
+    switch (cfg->cmd) {
+        case PERFTEST_READ_BW:
+        case PERFTEST_WRITE_BW:
+        case PERFTEST_SEND_BW:
+        case PERFTEST_ATOMIC_BW:
+            cfg->type = PERFTEST_BW;
+            break;
+        default:
+            cfg->type = PERFTEST_LAT;
+            break;
+    }
     init_cfg_api_type(cfg);
     cfg->eid_idx = 0;
     cfg->all = false;

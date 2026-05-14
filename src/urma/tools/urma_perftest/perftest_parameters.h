@@ -145,8 +145,22 @@ typedef enum perftest_cmd_type {
     PERFTEST_WRITE_BW,
     PERFTEST_SEND_BW,
     PERFTEST_ATOMIC_BW,
+    /*
+     * GPU 变种命令: 行为与 PERFTEST_READ_LAT / PERFTEST_WRITE_LAT 完全一致,
+     * 唯一区别是 register_mem() 时通过 perftest_gpu_alloc.[ch] 走
+     *   GDR -> peermem -> host-proxy -> memalign
+     * 的自动回退分配链, 让 read_lat_gpu / write_lat_gpu 在任意环境都能跑.
+     */
+    PERFTEST_READ_LAT_GPU,
+    PERFTEST_WRITE_LAT_GPU,
     PERFTEST_CMD_NUM
 } perftest_cmd_type_t;
+
+/* helper: 判定一个 cmd 是否为 GPU 变种 (供 register_mem 区分分配路径) */
+static inline int perftest_cmd_is_gpu(perftest_cmd_type_t c)
+{
+    return c == PERFTEST_READ_LAT_GPU || c == PERFTEST_WRITE_LAT_GPU;
+}
 
 typedef enum perftest_jetty_mode {
     PERFTEST_JETTY_SIMPLEX,                  /* simplex mode for jfs/jfr */

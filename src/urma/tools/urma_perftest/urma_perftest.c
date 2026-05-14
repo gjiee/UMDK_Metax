@@ -37,9 +37,11 @@ static int run_test(perftest_context_t *ctx, perftest_config_t *cfg)
 
     switch (cfg->cmd) {
         case PERFTEST_READ_LAT:
+        case PERFTEST_READ_LAT_GPU:    /* 与 READ_LAT 完全相同的主循环, 内存来源不同 */
             ret = run_read_lat(ctx, cfg);
             break;
         case PERFTEST_WRITE_LAT:
+        case PERFTEST_WRITE_LAT_GPU:   /* 与 WRITE_LAT 完全相同的主循环, 内存来源不同 */
             ret = run_write_lat(ctx, cfg);
             break;
         case PERFTEST_SEND_LAT:
