@@ -79,49 +79,78 @@ static void run_case(const char *label, unsigned force_mask,
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    T_LOG("starting minimal fallback-chain unit test (libc only)");
+    T_LOG("starting minimal --gpu-mode dispatch test (libc only)");
 
     /*
-     * 在 cloud agent 上 GDR 与 peermem 都不可用, host-proxy 默认也不可用
-     * (没有 libcuda.so.1), 所以"不强制失败"应当落到 MEMALIGN.
+     * 注意: 上一轮的"无条件 GDR->peermem->proxy->memalign"链路, 在本轮被
+     * 重构成"按 --gpu-mode 选一档 + fallback memalign". 因此这里用
+     * perftest_gpu_set_mode() 模拟 CLI 选择.
      */
-    run_case("env-natural (no GDR, no peermem, no libcuda)",
+
+    /*
+     * mode=NONE (默认): 不进 GPU 链, 直接 memalign.
+     */
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_NONE);
+    run_case("mode=NONE  -> memalign (default behaviour)",
              0,
              PERFTEST_GPU_ALLOC_MEMALIGN);
 
     /*
-     * 解锁 host-proxy 的 simulation 模式, GDR / peermem 仍然不可用 ->
-     * 期望落 HOST_PROXY.
+     * mode=PROXY 在无 libcuda 时若不开 sim 也是失败 -> fallback memalign.
+     */
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_PROXY);
+    run_case("mode=PROXY without libcuda/sim -> memalign fallback",
+             0,
+             PERFTEST_GPU_ALLOC_MEMALIGN);
+
+    /*
+     * 开 sim, mode=PROXY 应当落 HOST_PROXY.
      */
     setenv("PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM", "1", 1);
-    run_case("host-proxy simulation enabled",
+    run_case("mode=PROXY with sim -> HOST_PROXY",
              0,
              PERFTEST_GPU_ALLOC_HOST_PROXY);
 
     /*
-     * 强制 host-proxy 也失败 (即使 sim 开着), 回到 MEMALIGN.
+     * 强制 host-proxy 失败, 仍走 fallback memalign.
      */
-    run_case("force host-proxy fail -> memalign",
+    run_case("mode=PROXY + force HOST_PROXY fail -> memalign",
              1u << PERFTEST_GPU_ALLOC_HOST_PROXY,
              PERFTEST_GPU_ALLOC_MEMALIGN);
 
     /*
-     * 同时强制 host-proxy + 假装 GDR 与 peermem 已失败 (本来就失败),
-     * 仍然能落 MEMALIGN. 这一组验证"最坏情况依然成功".
+     * mode=PEERMEM 在 cloud agent 上无 cuda + 无 peermem 模块 -> memalign.
      */
-    run_case("force all three GPU levels -> memalign",
-             (1u << PERFTEST_GPU_ALLOC_GDR)        |
-             (1u << PERFTEST_GPU_ALLOC_PEERMEM)    |
-             (1u << PERFTEST_GPU_ALLOC_HOST_PROXY),
+    perftest_gpu_alloc_set_force_fail_mask(0);
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_PEERMEM);
+    run_case("mode=PEERMEM (no cuda) -> memalign fallback",
+             0,
              PERFTEST_GPU_ALLOC_MEMALIGN);
 
     /*
-     * 清掩码 + 再跑 sim 一次, 验证 set_force_fail_mask(0) 真的重置.
+     * mode=DIRECT 同上.
      */
-    perftest_gpu_alloc_set_force_fail_mask(0);
-    run_case("clear mask -> back to HOST_PROXY (sim still on)",
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_DIRECT);
+    run_case("mode=DIRECT (no cuda) -> memalign fallback",
              0,
-             PERFTEST_GPU_ALLOC_HOST_PROXY);
+             PERFTEST_GPU_ALLOC_MEMALIGN);
+
+    /*
+     * 字符串解析 sanity check.
+     */
+    {
+        perftest_gpu_mode_t m;
+        EXPECT(perftest_gpu_mode_from_string("proxy",   &m) == 0 &&
+               m == PERFTEST_GPU_MODE_PROXY, "from_string proxy");
+        EXPECT(perftest_gpu_mode_from_string("peermem", &m) == 0 &&
+               m == PERFTEST_GPU_MODE_PEERMEM, "from_string peermem");
+        EXPECT(perftest_gpu_mode_from_string("direct",  &m) == 0 &&
+               m == PERFTEST_GPU_MODE_DIRECT, "from_string direct");
+        EXPECT(perftest_gpu_mode_from_string("none",    &m) == 0 &&
+               m == PERFTEST_GPU_MODE_NONE, "from_string none");
+        EXPECT(perftest_gpu_mode_from_string("bogus",   &m) != 0,
+               "from_string bogus must fail");
+    }
 
     if (failures == 0) {
         fprintf(stderr, "\n[gpu-alloc-test] ALL CASES PASSED\n");
