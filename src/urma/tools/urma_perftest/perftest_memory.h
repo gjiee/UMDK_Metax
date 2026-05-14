@@ -255,6 +255,22 @@ perftest_memory_ops_t *perftest_rocm_mem_create(perftest_config_t *cfg);
 perftest_memory_ops_t *perftest_dmabuf_mem_create(perftest_config_t *cfg);
 
 /*
+ * perftest_gpu_proxy_create / 访问器
+ *
+ * 这是什么 (What):
+ *   "GPU 内存 + 无 GDR 驱动" 场景下的最小可工作后端 (perftest_mem_gpu_proxy.c).
+ *   它显式旁路 GDR (不调 urma_register_seg_dmabuf), 也不依赖 CUDA / ROCm /
+ *   内核 dma-buf 驱动, 因此可以在普通开发机上跑 demo 验证.
+ *
+ * 这两个访问器 (get_gpu_ptr / get_size) 只给独立的 demo 使用, 让 demo 在
+ * 没有真实 perftest 主循环的情况下也能"假装自己是 GPU 应用", 直接读写
+ * GPU buffer 然后看 stage_* 的效果. 真实 urma_perftest 不需要它们.
+ */
+perftest_memory_ops_t *perftest_gpu_proxy_create(perftest_config_t *cfg);
+void                  *perftest_gpu_proxy_get_gpu_ptr(perftest_memory_ops_t *ops);
+size_t                 perftest_gpu_proxy_get_size(perftest_memory_ops_t *ops);
+
+/*
  * 便利分发器: 根据 cfg->mem_type 调对应的 *_create.
  *   未来 register_mem() 的第一行就是
  *       ctx->mem_ops = perftest_memory_create(cfg);

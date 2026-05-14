@@ -19,6 +19,7 @@ add_executable(urma_perftest
     perftest_mem_cuda.c
     perftest_mem_rocm.c
     perftest_mem_dmabuf.c
+    perftest_mem_gpu_proxy.c
 )
 
 set_target_properties(urma_perftest
