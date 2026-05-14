@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) Huawei Technologies Co., Ltd. 2024-2026.
+#
+# 文件: Makefile.demo
+#
+# 这是什么 (What):
+#   把 perftest_mem_gpu_proxy.c + perftest_gpu_proxy_demo.c 编出一个独立
+#   demo 二进制 perftest_gpu_proxy_demo. *不需要* urma 库 / 内核头 /
+#   CUDA / ROCm —— 只用 libc 就够.
+#
+# 怎么用 (How):
+#   $ cd src/urma/tools/urma_perftest
+#   $ make -f Makefile.demo
+#   $ ./perftest_gpu_proxy_demo
+#
+# 为什么单独搞一个 Makefile:
+#   该目录原有的 CMakeLists.txt 会把 perftest_mem_gpu_proxy.c 一起编进
+#   urma_perftest 主程序里, 但那需要完整 ubcore + glib2-devel + libnl3-devel
+#   等依赖. demo 不依赖这些, 给开发者一个"5 秒钟跑起来"的入口.
+
+CC      ?= gcc
+CFLAGS  ?= -O2 -g -Wall -Wextra -std=c99 -D_GNU_SOURCE
+LDFLAGS ?=
+
+DEMO   := perftest_gpu_proxy_demo
+SRCS   := perftest_mem_gpu_proxy.c perftest_gpu_proxy_demo.c
+
+.PHONY: all clean run
+
+all: $(DEMO)
+
+$(DEMO): $(SRCS) perftest_memory.h
+	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
+
+run: $(DEMO)
+	./$(DEMO)
+
+clean:
+	rm -f $(DEMO)
