@@ -208,22 +208,38 @@ perftest_memory_ops_t *perftest_dmabuf_mem_create(perftest_config_t *cfg)
 }
 
 /*
- * 顶层分发器: 依据 cfg->mem_type 调对应工厂. 当前没法从 cfg 里读到字段
- * (那是 ABI 改动, 见 docs/urma_gdr_analysis.md §5.4), 所以默认走 host.
+ * 顶层分发器: 依据 cfg->mem_type 调对应工厂. 当前 cfg->mem_type 字段尚未
+ * 真正加进 perftest_config_t (那是 ABI 改动, 见 docs/urma_gdr_analysis.md
+ * \xc2\xa75.4), 因此本骨架根据环境变量 PERFTEST_MEM 选择:
  *
- * 真实现里:
- *     switch (cfg->mem_type) {
- *     case PERFTEST_MEM_HOST:   return perftest_host_mem_create(cfg);
- *     case PERFTEST_MEM_CUDA:   return perftest_cuda_mem_create(cfg);
- *     case PERFTEST_MEM_ROCM:   return perftest_rocm_mem_create(cfg);
- *     case PERFTEST_MEM_DMABUF: return perftest_dmabuf_mem_create(cfg);
- *     default: return NULL;
- *     }
+ *   PERFTEST_MEM=host      -> 原 host 后端 (现状)
+ *   PERFTEST_MEM=cuda      -> CUDA 后端 stub (仍走 GDR 协商)
+ *   PERFTEST_MEM=rocm      -> ROCm 后端 stub
+ *   PERFTEST_MEM=dmabuf    -> 通用 dmabuf 后端 stub
+ *   PERFTEST_MEM=gpu_proxy -> *** 本轮新增: 真正可工作的 GPU host-proxy ***
+ *
+ * 后续 cfg->mem_type 加好之后, 这里就改成 switch(cfg->mem_type).
  */
 perftest_memory_ops_t *perftest_memory_create(perftest_config_t *cfg)
 {
-    fprintf(stderr,
-        "[perftest-mem] create dispatcher: stub -> host (cfg->mem_type unused)\n");
+    const char *sel = getenv("PERFTEST_MEM");
+    if (sel == NULL) {
+        sel = "host";
+    }
+    fprintf(stderr, "[perftest-mem] %s: backend=%s\n", __func__, sel);
+
+    if (strcmp(sel, "gpu_proxy") == 0) {
+        return perftest_gpu_proxy_create(cfg);
+    }
+    if (strcmp(sel, "cuda") == 0) {
+        return perftest_cuda_mem_create(cfg);
+    }
+    if (strcmp(sel, "rocm") == 0) {
+        return perftest_rocm_mem_create(cfg);
+    }
+    if (strcmp(sel, "dmabuf") == 0) {
+        return perftest_dmabuf_mem_create(cfg);
+    }
     return perftest_host_mem_create(cfg);
 }
 

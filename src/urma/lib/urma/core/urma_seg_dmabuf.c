@@ -89,6 +89,8 @@ urma_target_seg_t *urma_register_seg_dmabuf(urma_context_t *ctx,
     }
 
     /*
+     * *** GDR bypass note (本骨架显式旁路, 不依赖内核) ***
+     *
      * 这里就是真实现要分发到 hw provider 的地方:
      *
      *     urma_ops_t *ops = ctx->ops;
@@ -98,12 +100,15 @@ urma_target_seg_t *urma_register_seg_dmabuf(urma_context_t *ctx,
      *     }
      *     return ops->register_seg_dmabuf(ctx, seg_cfg, dmabuf_fd, offset);
      *
-     * urma_ops 加新字段属于 ABI 改动, 该字段尚未真正加入结构, 因此本骨架
-     * 只是打印一行并以 ENOTSUP 返回, 让 perftest 知道驱动还不支持 dma-buf,
-     * 自动切到 host-proxy 模式继续跑.
+     * 而本 commit 的目标是"无 GDR 也跑 GPU 内存", 所以这里 *直接* 走旁路:
+     *   - 不访问 ctx->ops->register_seg_dmabuf (字段尚未加入 ABI);
+     *   - 不发任何 IOCTL, 不与内核 ubcore / udma 交互;
+     *   - 一律 print + 返回 NULL+EOPNOTSUPP, 让上层 perftest 知道 GDR 路径
+     *     不可用, 自动切换到 perftest_mem_gpu_proxy.c 的 host-proxy 模式
+     *     继续跑.
      */
-    URMA_DMABUF_LOG("register_seg_dmabuf: stub -- driver dma-buf path not yet wired "
-                    "(va=0x%lx len=%lu fd=%d off=%lu) -> ENOTSUP",
+    URMA_DMABUF_LOG("%s: BYPASS (no kernel) va=0x%lx len=%lu fd=%d off=%lu -> ENOTSUP",
+                    __func__,
                     (unsigned long)seg_cfg->va, (unsigned long)seg_cfg->len,
                     dmabuf_fd, (unsigned long)offset);
     errno = EOPNOTSUPP;
