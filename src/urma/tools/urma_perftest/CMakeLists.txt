@@ -20,6 +20,10 @@ add_executable(urma_perftest
     perftest_mem_rocm.c
     perftest_mem_dmabuf.c
     perftest_mem_gpu_proxy.c
+    # GPU allocator with automatic fallback (GDR -> peermem -> host-proxy ->
+    # memalign), used by the new read_lat_gpu / write_lat_gpu test commands.
+    # API is in perftest_gpu_alloc.h; see docs/urma_gpu_alloc_fallback.md.
+    perftest_gpu_alloc.c
 )
 
 set_target_properties(urma_perftest

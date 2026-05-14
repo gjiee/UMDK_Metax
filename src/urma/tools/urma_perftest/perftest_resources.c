@@ -22,7 +22,23 @@
 #include "urma_api.h"
 #include "urma_ubagg.h"
 
+#include "perftest_gpu_alloc.h"
 #include "perftest_resources.h"
+
+/*
+ * GPU 变种命令 (read_lat_gpu / write_lat_gpu) 专用的内存追踪.
+ *
+ * 这是什么:
+ *   register_mem() 在 GPU 变种下用 perftest_gpu_alloc_buffer 拿缓冲, 返回
+ *   一个 perftest_gpu_buffer_t (含 .addr / .strategy / .gpu_ptr / fd 等).
+ *   free_memory() 需要原样回收, 所以把每个 jetty 的 buffer 描述符暂存在
+ *   下面这个文件级静态数组里. 这是最小侵入的做法 -- 不改 perftest_context_t.
+ *
+ * 一旦 perftest_context_t 的 mem_ops / gpu_bufs 字段正式加入 ABI (见
+ * perftest_resources.h 注释块), 这块改成 ctx->gpu_bufs[i] 即可.
+ */
+static perftest_gpu_buffer_t *g_perftest_gpu_bufs;     /* 长度 = cfg->jettys */
+static uint32_t               g_perftest_gpu_bufs_n;
 
 #define PERFTEST_DEF_ACCESS (URMA_ACCESS_READ | URMA_ACCESS_WRITE | URMA_ACCESS_ATOMIC)
 
@@ -726,7 +742,11 @@ static void free_memory(perftest_context_t *ctx, const perftest_config_t *cfg, c
     uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
     for (uint32_t j = 0; j < idx; j++) {
         if (j < seg_num) {
-            if (cfg->use_huge_page == false) {
+            if (perftest_cmd_is_gpu(cfg->cmd) && g_perftest_gpu_bufs != NULL &&
+                j < g_perftest_gpu_bufs_n) {
+                /* GPU 变种: 委托给分配器同一套清理逻辑 (按 strategy 区分). */
+                perftest_gpu_free_buffer(&g_perftest_gpu_bufs[j]);
+            } else if (cfg->use_huge_page == false) {
                 free(ctx->local_buf[j]);
             } else {
                 ret = ub_hugefree(ctx->local_buf[j], ctx->buf_len);
@@ -735,6 +755,11 @@ static void free_memory(perftest_context_t *ctx, const perftest_config_t *cfg, c
                 }
             }
         }
+    }
+    if (perftest_cmd_is_gpu(cfg->cmd) && g_perftest_gpu_bufs != NULL) {
+        free(g_perftest_gpu_bufs);
+        g_perftest_gpu_bufs   = NULL;
+        g_perftest_gpu_bufs_n = 0;
     }
     free(ctx->local_buf);
     ctx->local_buf = NULL;
@@ -787,8 +812,46 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     ctx->buf_len = ctx->buf_size * PERFTEST_BUF_NUM *
         ((cfg->seg_pre_jetty == true) ? 1 : cfg->jettys);
 
+    /*
+     * GPU 变种内存分配旁路:
+     *   read_lat_gpu / write_lat_gpu 走 perftest_gpu_alloc_buffer, 内部
+     *   GDR -> peermem -> host-proxy -> memalign 自动回退. 其它 cmd 与原来
+     *   100% 一致, 保留 use_huge_page / memalign 双分支.
+     */
+    if (perftest_cmd_is_gpu(cfg->cmd)) {
+        if (g_perftest_gpu_bufs == NULL) {
+            g_perftest_gpu_bufs = calloc(cfg->jettys, sizeof(*g_perftest_gpu_bufs));
+            if (g_perftest_gpu_bufs == NULL) {
+                (void)fprintf(stderr,
+                    "Failed to alloc g_perftest_gpu_bufs (jettys=%u)\n", cfg->jettys);
+                goto free_memory;
+            }
+            g_perftest_gpu_bufs_n = cfg->jettys;
+        }
+        (void)fprintf(stderr,
+            "%s: GPU variant cmd=%d, dispatching to perftest_gpu_alloc_buffer "
+            "(GDR -> peermem -> host-proxy -> memalign)\n", __func__, (int)cfg->cmd);
+    }
+
     for (i = 0; i < cfg->jettys; i++) {
-        if (cfg->use_huge_page) {
+        if (perftest_cmd_is_gpu(cfg->cmd)) {
+            if (i < seg_num) {
+                if (perftest_gpu_alloc_buffer(ctx->buf_len, ctx->page_size,
+                                              &g_perftest_gpu_bufs[i]) != 0) {
+                    (void)fprintf(stderr,
+                        "perftest_gpu_alloc_buffer failed jetty=%u\n", i);
+                    goto free_memory;
+                }
+                ctx->local_buf[i] = g_perftest_gpu_bufs[i].addr;
+                (void)fprintf(stderr,
+                    "%s: jetty=%u strategy=%s addr=%p len=%lu\n",
+                    __func__, i,
+                    perftest_gpu_alloc_strategy_name(g_perftest_gpu_bufs[i].strategy),
+                    g_perftest_gpu_bufs[i].addr, (unsigned long)ctx->buf_len);
+            } else {
+                ctx->local_buf[i] = ctx->local_buf[0];
+            }
+        } else if (cfg->use_huge_page) {
             if (i < seg_num) {
                 ctx->local_buf[i] = ub_hugemalloc(ctx->buf_len, cfg->huge_page, NULL);
             } else {
