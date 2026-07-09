@@ -82,6 +82,19 @@ cat > "$ISOLATE_DIR/run.sh" <<EOF
 # 一键用隔离目录里的 liburma.so / liburma-udma.so 跑命令，
 # 不影响系统 /usr/lib64 下的原生库。
 export LD_LIBRARY_PATH="$ISOLATE_DIR/lib:\${LD_LIBRARY_PATH:-}"
+
+# 每次运行都打印一次实际解析到的 liburma*.so 路径，防止 sudo/环境变量丢失、
+# 或者目标机器上其它 /etc/ld.so.conf.d 配置抢先命中系统库而不自知——
+# "Failed to create urma instance!" 这种在 create_context 阶段就失败的问题，
+# 十有八九是这里解析到了不匹配的库/内核 ABI 不一致，而不是 GPU 代码本身的锅。
+if [ "\${UMDK_RUN_QUIET:-0}" != "1" ]; then
+	echo "[run.sh] LD_LIBRARY_PATH=\$LD_LIBRARY_PATH" >&2
+	TARGET_BIN="\$1"
+	if command -v ldd >/dev/null 2>&1 && [ -f "\$TARGET_BIN" ]; then
+		echo "[run.sh] ldd \$TARGET_BIN | grep liburma:" >&2
+		ldd "\$TARGET_BIN" 2>/dev/null | grep -i liburma >&2 || echo "[run.sh]   (没匹配到 liburma，检查一下！)" >&2
+	fi
+fi
 exec "\$@"
 EOF
 chmod +x "$ISOLATE_DIR/run.sh"
