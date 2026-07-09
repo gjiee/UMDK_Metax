@@ -936,12 +936,32 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     for (j = 0; j < cfg->jettys; j++) {
         if (j < seg_num) {
             seg_cfg.va = (uint64_t)ctx->local_buf[j];
-	    seg_cfg.is_gpu_seg = perftest_cmd_is_gpu(cfg->cmd) ? 1 : 0;   //TONG: GDR TEST, GPU ADD EXTRA FLAG then go kernel
-	    printf("GDR TEST: seg_cfg.is_gpu_seg %d\n",seg_cfg.is_gpu_seg);
+            /*
+             * FIX: is_gpu_seg 必须根据"这段内存实际是不是真的分配到了 GPU
+             * 显存"来定，不能只看命令名字是不是 *_gpu。--gpu-mode=proxy
+             * 在跑的机器没装 CUDA/GPU 驱动时会自动降级成 PERFTEST_GPU_ALLOC_MEMALIGN
+             * (普通 memalign 出来的 host 堆内存)。如果这里只看 cfg->cmd,
+             * 降级之后的 host 段仍然会被打上 is_gpu_seg=1 传给内核，内核会
+             * 拿着这个"假 GPU VA"（其实是普通堆地址）去调 GPU pin 接口，
+             * 必然失败——同时会触发 udma_u_segment.c 里"GPU 段没 grant 过、
+             * 失败时却被 ungrant"那条 bug（已修复），两个问题叠加正是
+             * 之前那次超时卡死的根因。
+             * 只有 ctx->gpu_bufs[j].strategy 真的是 GPU 相关策略
+             * (非 MEMALIGN/NONE) 才标 is_gpu_seg=1；client 侧没有真 GPU、
+             * 自动降级成 MEMALIGN 的那一路会正确走普通 host 段注册。
+             */
+            {
+                perftest_gpu_buffer_t *gbuf = (ctx->gpu_bufs != NULL && j < ctx->gpu_bufs_n)
+                    ? &ctx->gpu_bufs[j] : NULL;
+                bool truly_gpu = gbuf != NULL &&
+                    gbuf->strategy != PERFTEST_GPU_ALLOC_MEMALIGN &&
+                    gbuf->strategy != PERFTEST_GPU_ALLOC_NONE;
+                seg_cfg.is_gpu_seg = truly_gpu ? 1 : 0;
+            }
             if (ctx->urma_ctx->dev->type == URMA_TRANSPORT_UB) {
                 seg_cfg.token_id = ctx->token_id[j];
             }
-            ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg); // TONG: HERE WE GO TO KERNEL, WE NEED PATCH PEERMEM CLIENT FOR URMA DRIVER
+            ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg);
         } else {
             ctx->local_tseg[j] = ctx->local_tseg[0];
         }

@@ -161,7 +161,7 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 	}
 
 	udma_u_init_seg_cfg(urma_ctx, seg_cfg, seg);
-	
+
 	if (!seg->is_gpu_seg) {                       /* GPU no need GRANT FOR GDR TEST */
 		ret = udma_u_grant_segment(seg);
 		if (ret) {
@@ -171,15 +171,6 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 		}
 	}
 
-
-	if (ret) {
-		UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",
-			     seg_cfg->flag.bs.access, ret);
-		goto err_ummu_grant;
-	}
-	fprintf(stderr, "ENTER udma_u_register_seg va=%p len=%lu\n",
-        (void *)seg_cfg->va, seg_cfg->len);
-		
 	ret = udma_exec_register_seg_cmd(urma_ctx, seg_cfg, &seg->urma_tseg);
 	if (ret)
 		goto err_pin_segment;
@@ -187,7 +178,17 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 	return &seg->urma_tseg;
 
 err_pin_segment:
-	udma_u_ungrant_seg(seg);
+	/*
+	 * FIX: 只有真正调过 udma_u_grant_segment() 的段（!seg->is_gpu_seg）
+	 * 才需要 ungrant。GPU 段从没 grant 过，如果 udma_exec_register_seg_cmd()
+	 * 在这里失败（比如内核 GPU pin 路径强制返回错误做测试、或者真实
+	 * pin 失败），原来这里会无条件调 udma_u_ungrant_seg(seg)，对一个
+	 * 从未 grant 过的 GPU 段做 ungrant —— ummu_ungrant() 对"从未 grant
+	 * 过的地址"的行为未知（可能报错，也可能卡住/未定义），是之前
+	 * 内核那边一强制返回错误、这边就疑似卡死的直接原因。
+	 */
+	if (!seg->is_gpu_seg)
+		udma_u_ungrant_seg(seg);
 err_ummu_grant:
 	free(seg);
 	return NULL;
