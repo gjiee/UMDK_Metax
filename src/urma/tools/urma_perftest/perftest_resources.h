@@ -118,6 +118,12 @@ typedef struct perftest_context {
     /* write dirty thread */
     pthread_t write_dirty_thread_id;
 
+    /* GPU buffer */
+    //  local_buf[i] = gpu_bufs[idx].addr = host shadow
+    //  gpu_bufs[idx].gpu_ptr = CUDA device buffer
+    perftest_gpu_buffer_t *gpu_bufs;
+    uint32_t gpu_bufs_n;
+
     /*
      * GDR 框架 (comment only, 暂未真正加进 struct, 因为 ABI 改动 + 上层
      * malloc 的 sizeof 要随之调整):
@@ -156,4 +162,7 @@ void destroy_ctx(perftest_context_t *ctx, perftest_config_t *cfg);
 
 /* Warm_up function is only available for READ/WRITE/ATOMIC bw test. */
 int perform_warm_up(perftest_context_t *ctx, perftest_config_t *cfg);
+perftest_gpu_buffer_t *perftest_ctx_gpu_buf(perftest_context_t *ctx,
+                                                          const perftest_config_t *cfg,
+                                                          uint32_t id); 
 #endif

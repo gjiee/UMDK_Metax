@@ -22,9 +22,12 @@
 #include "urma_api.h"
 #include "urma_ubagg.h"
 
+#include "urma_types.h" // for flag to ioctl 
 #include "perftest_gpu_alloc.h"
 #include "perftest_resources.h"
 
+
+#define PERFTEST_GPU_SEG_ALIGN  (64u * 1024u) //for GPU ALLIGN
 /*
  * GPU 变种命令 (read_lat_gpu / write_lat_gpu) 专用的内存追踪.
  *
@@ -37,8 +40,8 @@
  * 一旦 perftest_context_t 的 mem_ops / gpu_bufs 字段正式加入 ABI (见
  * perftest_resources.h 注释块), 这块改成 ctx->gpu_bufs[i] 即可.
  */
-static perftest_gpu_buffer_t *g_perftest_gpu_bufs;     /* 长度 = cfg->jettys */
-static uint32_t               g_perftest_gpu_bufs_n;
+//static perftest_gpu_buffer_t *g_perftest_gpu_bufs;     // 长度 = cfg->jettys 
+//static uint32_t               g_perftest_gpu_bufs_n;
 
 #define PERFTEST_DEF_ACCESS (URMA_ACCESS_READ | URMA_ACCESS_WRITE | URMA_ACCESS_ATOMIC)
 
@@ -58,6 +61,35 @@ static const char *log_level_str[] = {
     "INFO",      /* URMA_VLOG_LEVEL_INFO */
     "DEBUG"      /* URMA_VLOG_LEVEL_DEBUG */
 };
+
+//helper to get the GPU memory for proxy model
+perftest_gpu_buffer_t *perftest_ctx_gpu_buf(perftest_context_t *ctx,
+                                                          const perftest_config_t *cfg,
+                                                          uint32_t id)
+{
+    uint32_t idx;
+
+    if (ctx == NULL || cfg == NULL)
+        return NULL;
+
+    if (!perftest_cmd_is_gpu(cfg->cmd))
+        return NULL;
+
+    if (ctx->gpu_bufs == NULL || ctx->gpu_bufs_n == 0)
+        return NULL;
+
+    idx = cfg->seg_pre_jetty ? id : 0;
+
+    if (idx >= ctx->gpu_bufs_n)
+        return NULL;
+
+    if (ctx->gpu_bufs[idx].addr == NULL)
+        return NULL;
+
+    return &ctx->gpu_bufs[idx];
+}
+
+
 
 static void print_log(int level, char *message)
 {
@@ -736,16 +768,17 @@ static inline void free_token_id(perftest_context_t *ctx, const perftest_config_
     ctx->token_id = NULL;
 }
 
+
 static void free_memory(perftest_context_t *ctx, const perftest_config_t *cfg, const int idx)
 {
     int ret = 0;
     uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
     for (uint32_t j = 0; j < idx; j++) {
         if (j < seg_num) {
-            if (perftest_cmd_is_gpu(cfg->cmd) && g_perftest_gpu_bufs != NULL &&
-                j < g_perftest_gpu_bufs_n) {
+            if (perftest_cmd_is_gpu(cfg->cmd) && ctx->gpu_bufs != NULL &&
+                j < ctx->gpu_bufs_n) {
                 /* GPU 变种: 委托给分配器同一套清理逻辑 (按 strategy 区分). */
-                perftest_gpu_free_buffer(&g_perftest_gpu_bufs[j]);
+                perftest_gpu_free_buffer(&ctx->gpu_bufs[j]);
             } else if (cfg->use_huge_page == false) {
                 free(ctx->local_buf[j]);
             } else {
@@ -756,10 +789,10 @@ static void free_memory(perftest_context_t *ctx, const perftest_config_t *cfg, c
             }
         }
     }
-    if (perftest_cmd_is_gpu(cfg->cmd) && g_perftest_gpu_bufs != NULL) {
-        free(g_perftest_gpu_bufs);
-        g_perftest_gpu_bufs   = NULL;
-        g_perftest_gpu_bufs_n = 0;
+    if (perftest_cmd_is_gpu(cfg->cmd) && ctx->gpu_bufs != NULL) {
+        free(ctx->gpu_bufs);
+        ctx->gpu_bufs   = NULL;
+        ctx->gpu_bufs_n = 0;
     }
     free(ctx->local_buf);
     ctx->local_buf = NULL;
@@ -770,20 +803,7 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     uint32_t i = 0, j = 0, k = 0;
     const uint64_t perftest_page_size_2MB = 2 * 1024 * 1024;
     const uint64_t perftest_page_size_1GB = 1024 * 1024 * 1024;
-    /*
-     * GDR 改造接入点 (TODO, 见 perftest_memory.h):
-     *
-     *   if (ctx->mem_ops == NULL) {
-     *       ctx->mem_ops = perftest_memory_create(cfg);  // host / cuda / rocm / dmabuf
-     *       if (!ctx->mem_ops || ctx->mem_ops->init(ctx->mem_ops, cfg) != 0)
-     *           return -1;
-     *   }
-     *   后续 alloc_buffer 与 urma_register_seg / urma_register_seg_dmabuf
-     *   都按 mem_ops 的指引走.
-     *
-     * 当前 commit 不在这里替换主流程, 只把抽象层 (perftest_memory.h +
-     * perftest_mem_*.c) 准备好, 让真正改主流程的 patch 改动量最小.
-     */
+
     ctx->local_buf = calloc(1, sizeof(void *) * cfg->jettys);
     if (ctx->local_buf == NULL) {
         return -ENOMEM;
@@ -819,22 +839,16 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
      *   100% 一致, 保留 use_huge_page / memalign 双分支.
      */
     if (perftest_cmd_is_gpu(cfg->cmd)) {
-        if (g_perftest_gpu_bufs == NULL) {
-            g_perftest_gpu_bufs = calloc(cfg->jettys, sizeof(*g_perftest_gpu_bufs));
-            if (g_perftest_gpu_bufs == NULL) {
-                (void)fprintf(stderr,
-                    "Failed to alloc g_perftest_gpu_bufs (jettys=%u)\n", cfg->jettys);
-                goto free_memory;
-            }
-            g_perftest_gpu_bufs_n = cfg->jettys;
+        ctx->gpu_bufs_n = seg_num;
+        ctx->gpu_bufs = calloc(ctx->gpu_bufs_n, sizeof(*ctx->gpu_bufs));
+        if (ctx->gpu_bufs == NULL) {
+            fprintf(stderr, "Failed to alloc ctx->gpu_bufs, n=%u\n", ctx->gpu_bufs_n);
+            goto free_memory;
         }
-        /*
-         * 让 perftest_gpu_alloc_buffer 知道 CLI --gpu-mode 选了哪个入口.
-         * NONE = 直接 memalign; PROXY/PEERMEM/DIRECT = 尝试该路径, 失败再
-         * fallback memalign. 详见 perftest_gpu_alloc.h 注释.
-         */
+
         perftest_gpu_set_mode((perftest_gpu_mode_t)cfg->gpu_mode);
-        (void)fprintf(stderr,
+
+        fprintf(stderr,
             "%s: GPU variant cmd=%d gpu-mode=%s -> perftest_gpu_alloc_buffer\n",
             __func__, (int)cfg->cmd,
             perftest_gpu_mode_name((perftest_gpu_mode_t)cfg->gpu_mode));
@@ -844,17 +858,17 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
         if (perftest_cmd_is_gpu(cfg->cmd)) {
             if (i < seg_num) {
                 if (perftest_gpu_alloc_buffer(ctx->buf_len, ctx->page_size,
-                                              &g_perftest_gpu_bufs[i]) != 0) {
+                                              &ctx->gpu_bufs[i]) != 0) {
                     (void)fprintf(stderr,
                         "perftest_gpu_alloc_buffer failed jetty=%u\n", i);
                     goto free_memory;
                 }
-                ctx->local_buf[i] = g_perftest_gpu_bufs[i].addr;
+                ctx->local_buf[i] = ctx->gpu_bufs[i].addr;
                 (void)fprintf(stderr,
                     "%s: jetty=%u strategy=%s addr=%p len=%lu\n",
                     __func__, i,
-                    perftest_gpu_alloc_strategy_name(g_perftest_gpu_bufs[i].strategy),
-                    g_perftest_gpu_bufs[i].addr, (unsigned long)ctx->buf_len);
+                     perftest_gpu_alloc_strategy_name(ctx->gpu_bufs[i].strategy),
+                    ctx->gpu_bufs[i].addr, (unsigned long)ctx->buf_len);
             } else {
                 ctx->local_buf[i] = ctx->local_buf[0];
             }
@@ -922,29 +936,12 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     for (j = 0; j < cfg->jettys; j++) {
         if (j < seg_num) {
             seg_cfg.va = (uint64_t)ctx->local_buf[j];
+	    seg_cfg.is_gpu_seg = perftest_cmd_is_gpu(cfg->cmd) ? 1 : 0;   //TONG: GDR TEST, GPU ADD EXTRA FLAG then go kernel
+	    printf("GDR TEST: seg_cfg.is_gpu_seg %d\n",seg_cfg.is_gpu_seg);
             if (ctx->urma_ctx->dev->type == URMA_TRANSPORT_UB) {
                 seg_cfg.token_id = ctx->token_id[j];
             }
-            /*
-             * GDR 分发点 (TODO):
-             *   if (ctx->mem_ops &&
-             *       ctx->mem_ops->gdr_mode == PERFTEST_GDR_DIRECT &&
-             *       ctx->dmabuf_fds[j] >= 0) {
-             *       ctx->local_tseg[j] = urma_register_seg_dmabuf(
-             *           ctx->urma_ctx, &seg_cfg,
-             *           ctx->dmabuf_fds[j], ctx->dmabuf_offsets[j]);
-             *       if (!ctx->local_tseg[j] && errno == EOPNOTSUPP) {
-             *           // GDR 不可用 -> 自动降级到 host-proxy 模式,
-             *           // 重新分配一个 host shadow buffer 然后再 register_seg.
-             *           perftest_fallback_to_host_proxy(ctx, cfg, j);
-             *           ctx->local_tseg[j] =
-             *               urma_register_seg(ctx->urma_ctx, &seg_cfg);
-             *       }
-             *   } else {
-             *       ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg);
-             *   }
-             */
-            ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg);
+            ctx->local_tseg[j] = urma_register_seg(ctx->urma_ctx, &seg_cfg); // TONG: HERE WE GO TO KERNEL, WE NEED PATCH PEERMEM CLIENT FOR URMA DRIVER
         } else {
             ctx->local_tseg[j] = ctx->local_tseg[0];
         }

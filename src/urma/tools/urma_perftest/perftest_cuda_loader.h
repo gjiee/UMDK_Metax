@@ -43,6 +43,8 @@
 extern "C" {
 #endif
 
+
+int perftest_cuda_set_current_ctx(void);
 /*
  * 一次性 dlopen + dlsym. 重复调用安全, 内部带 idempotent 标志.
  * 返回 0 表示后续 perftest_cuda_* 接口可用, 返回 -1 表示 libcuda 不在.

@@ -221,6 +221,7 @@ struct udma_u_segment {
 	uint64_t len;                 /* specify the length of the segment to be registered */
 	uint64_t va;                  /* specify the address of the segment to be registered */
 	uint32_t tid;
+	bool is_gpu_seg;
 };
 
 struct udma_u_target_jetty {

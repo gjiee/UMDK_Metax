@@ -314,16 +314,9 @@ static int try_alloc_host_proxy(size_t size, size_t alignment,
         }
     } else {
         /* sim 模式: 没装 CUDA 时仍能跑业务逻辑, GPU 与 shadow 都用 memalign. */
-        GA_LOG("simulation mode: using memalign for both gpu_ptr and shadow");
-        gpu_ptr = memalign(alignment, size);
-        shadow  = memalign(alignment, size);
-        if (gpu_ptr == NULL || shadow == NULL) {
-            free(gpu_ptr); free(shadow);
-            GA_LOG("FAIL: ENOMEM");
-            return -1;
-        }
-        memset(gpu_ptr, 0, size);
-        memset(shadow,  0, size);
+    
+        return -1;
+ 
     }
 
     out->addr          = shadow;          /* URMA register_seg 注册 shadow */
@@ -472,7 +465,7 @@ int perftest_gpu_stage_to_nic(perftest_gpu_buffer_t *buf, size_t len)
         return perftest_cuda_memcpy_d2h(buf->addr, buf->gpu_ptr, len);
     }
     /* sim 模式: GPU 也是 host memory, 用普通 memcpy 等价. */
-    memcpy(buf->addr, buf->gpu_ptr, len);
+    //memcpy(buf->addr, buf->gpu_ptr, len);
     return 0;
 }
 
@@ -492,10 +485,37 @@ int perftest_gpu_stage_from_nic(perftest_gpu_buffer_t *buf, size_t len)
     if (perftest_cuda_is_loaded()) {
         return perftest_cuda_memcpy_h2d(buf->gpu_ptr, buf->addr, len);
     }
-    memcpy(buf->gpu_ptr, buf->addr, len);
+    //memcpy(buf->gpu_ptr, buf->addr, len);
     return 0;
 }
 
+int perftest_gpu_stage_to_nic_range(perftest_gpu_buffer_t *buf,
+                                    size_t off, size_t len)
+{
+    if (buf == NULL || off + len > buf->size)
+        return -1;
+
+    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY)
+        return 0;
+
+    return perftest_cuda_memcpy_d2h((char *)buf->addr + off,
+                                    (void *)((uintptr_t)buf->gpu_ptr + off),
+                                    len);
+}
+
+int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
+                                      size_t off, size_t len)
+{
+    if (buf == NULL || off + len > buf->size)
+        return -1;
+
+    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY)
+        return 0;
+
+    return perftest_cuda_memcpy_h2d((void *)((uintptr_t)buf->gpu_ptr + off),
+                                    (char *)buf->addr + off,
+                                    len);
+}
 void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
 {
     if (buf == NULL) return;

@@ -95,6 +95,46 @@ DECL_SYM(cuMemcpyDtoH);
 DECL_SYM(cuMemcpyHtoD);
 DECL_SYM(cuMemGetHandleForAddressRange);
 
+//Change the context to current thread
+static int perftest_cuda_make_ctx_current(void)
+{
+    CUresult rc;
+
+    if (!g_loaded) {
+        CL_LOG("loader not initialised");
+        return -1;
+    }
+
+    if (!g_ctx) {
+        CL_LOG("CUDA ctx not created");
+        return -1;
+    }
+
+    rc = g_cuCtxSetCurrent(g_ctx);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("cuCtxSetCurrent -> %d", (int)rc);
+        return -1;
+    }
+
+    return 0;
+}
+
+int perftest_cuda_set_current_ctx(void)
+{
+    CUresult rc;
+
+    if (!g_loaded || !g_ctx)
+        return -1;
+
+    rc = g_cuCtxSetCurrent(g_ctx);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("cuCtxSetCurrent -> %d", (int)rc);
+        return -1;
+    }
+
+    return 0;
+}
+
 /*
  * 部分 CUDA Driver API 名字带 _v2 后缀 (ABI stable handle). 这里两个候选名
  * 都尝试, 与 linux-rdma 的做法一致.
@@ -194,6 +234,97 @@ int perftest_cuda_is_loaded(void)
 {
     return g_loaded ? 1 : 0;
 }
+
+//DEBUG
+
+static void dump_cuda_ptr(const char *name, void *p)
+{
+    typedef CUresult (*pfn_cuPointerGetAttribute_local)(
+        void *data, int attribute, CUdeviceptr ptr);
+
+    enum {
+        PTR_ATTR_MEMORY_TYPE      = 2,
+        PTR_ATTR_IS_MANAGED       = 8,
+        PTR_ATTR_DEVICE_ORDINAL   = 9,
+        PTR_ATTR_RANGE_START_ADDR = 11,
+        PTR_ATTR_RANGE_SIZE       = 12
+    };
+
+    static pfn_cuPointerGetAttribute_local p_cuPointerGetAttribute = NULL;
+
+    CUdeviceptr d;
+    CUresult rc;
+    int mem_type = 0;
+    int dev = -1;
+    unsigned int managed = 0;
+    void *range_start = NULL;
+    size_t range_size = 0;
+    const char *type_str = "";
+
+    if (!g_loaded || g_libcuda == NULL) {
+        CL_LOG("%s=%p: loader not initialised", name, p);
+        return;
+    }
+
+    if (p == NULL) {
+        CL_LOG("%s=NULL", name);
+        return;
+    }
+
+    if (p_cuPointerGetAttribute == NULL) {
+        p_cuPointerGetAttribute =
+            (pfn_cuPointerGetAttribute_local)dlsym2(
+                g_libcuda, "cuPointerGetAttribute", NULL);
+
+        if (p_cuPointerGetAttribute == NULL) {
+            CL_LOG("%s=%p: cuPointerGetAttribute not available", name, p);
+            return;
+        }
+    }
+
+    d = (CUdeviceptr)(uintptr_t)p;
+
+    rc = p_cuPointerGetAttribute(&mem_type, PTR_ATTR_MEMORY_TYPE, d);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("%s=%p MEMORY_TYPE failed rc=%d", name, p, (int)rc);
+        return;
+    }
+
+    rc = p_cuPointerGetAttribute(&dev, PTR_ATTR_DEVICE_ORDINAL, d);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("%s=%p DEVICE_ORDINAL failed rc=%d", name, p, (int)rc);
+    }
+
+    rc = p_cuPointerGetAttribute(&managed, PTR_ATTR_IS_MANAGED, d);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("%s=%p IS_MANAGED failed rc=%d", name, p, (int)rc);
+    }
+
+    rc = p_cuPointerGetAttribute(&range_start, PTR_ATTR_RANGE_START_ADDR, d);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("%s=%p RANGE_START failed rc=%d", name, p, (int)rc);
+    }
+
+    rc = p_cuPointerGetAttribute(&range_size, PTR_ATTR_RANGE_SIZE, d);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("%s=%p RANGE_SIZE failed rc=%d", name, p, (int)rc);
+    }
+
+    if (mem_type == 1) {
+        type_str = "HOST";
+    } else if (mem_type == 2) {
+        type_str = "DEVICE";
+    } else if (mem_type == 4) {
+        type_str = "UNIFIED";
+    } else {
+        type_str = "UNKNOWN";
+    }
+
+    CL_LOG("%s=%p mem_type=%d(%s) dev=%d managed=%u range_start=%p range_size=%zu",
+           name, p, mem_type, type_str, dev, managed, range_start, range_size);
+}
+
+
 
 /* ---- context ---- */
 int perftest_cuda_ctx_create(int dev_id)
@@ -304,12 +435,15 @@ int perftest_cuda_memcpy_d2h(void *host, void *dev, size_t n)
 {
     CUresult rc;
     if (!g_loaded) { CL_LOG("loader not initialised"); return -1; }
+    if (perftest_cuda_make_ctx_current() != 0)    return -1; //check if current thread has the context
+
     rc = g_cuMemcpyDtoH(host, (CUdeviceptr)(uintptr_t)dev, n);
     if (rc != CUDA_SUCCESS) {
         CL_LOG("cuMemcpyDtoH -> %d (host=%p dev=%p n=%zu)",
                (int)rc, host, dev, n);
         return -1;
     }
+    //printf("ACTUALLY GO TO CUDA\n");
     return 0;
 }
 
@@ -317,6 +451,7 @@ int perftest_cuda_memcpy_h2d(void *dev, const void *host, size_t n)
 {
     CUresult rc;
     if (!g_loaded) { CL_LOG("loader not initialised"); return -1; }
+    if (perftest_cuda_make_ctx_current() != 0)    return -1; //check if current thread has the context
     rc = g_cuMemcpyHtoD((CUdeviceptr)(uintptr_t)dev, host, n);
     if (rc != CUDA_SUCCESS) {
         CL_LOG("cuMemcpyHtoD -> %d (dev=%p host=%p n=%zu)",
@@ -326,12 +461,20 @@ int perftest_cuda_memcpy_h2d(void *dev, const void *host, size_t n)
     return 0;
 }
 
+
+
 /* ---- dma-buf ---- */
 int perftest_cuda_get_dmabuf_fd(void *dptr, size_t size,
                                 int *out_fd, uint64_t *out_offset)
 {
     int      fd = -1;
     CUresult rc;
+    if (perftest_cuda_make_ctx_current() != 0)
+    return -1;
+
+
+
+    dump_cuda_ptr("dmabuf dptr", dptr);
 
     if (!g_loaded || out_fd == NULL || out_offset == NULL) {
         CL_LOG("invalid arg"); return -1;
@@ -366,3 +509,4 @@ int perftest_cuda_get_dmabuf_fd(void *dptr, size_t size,
     }
     return 0;
 }
+

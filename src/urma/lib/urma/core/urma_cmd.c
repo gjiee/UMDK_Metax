@@ -245,6 +245,7 @@ int urma_cmd_register_seg(urma_context_t *ctx, urma_target_seg_t *tseg, urma_seg
         errno = EINVAL;
         return -1;
     }
+    
 
     int ret;
     urma_cmd_register_seg_t arg = {0};
@@ -258,7 +259,7 @@ int urma_cmd_register_seg(urma_context_t *ctx, urma_target_seg_t *tseg, urma_seg
     arg.in.flag = cfg->flag.value;
     urma_cmd_set_udrv_priv(&arg.udata, udata);
 
-    ret = urma_ioctl_register_seg(ctx->dev_fd, &arg);
+    ret = urma_ioctl_register_seg(ctx->dev_fd, &arg);//HERE FAILED
     if (ret != 0) {
         URMA_LOG_ERR("ioctl failed in urma_cmd_register_seg, ret=%d, errno=%d.\n", ret, errno);
         return ret;

@@ -85,7 +85,7 @@ typedef struct perftest_gpu_buffer {
     size_t                         size;
     int                            dmabuf_fd;       /* >=0 only for GDR */
     uint64_t                       dmabuf_offset;
-    void                          *gpu_ptr;         /* HOST_PROXY: simulated GPU buf */
+    void                          *gpu_ptr;         /* HOST_PROXY: GPU buf */
     perftest_gpu_alloc_strategy_t  strategy;
 } perftest_gpu_buffer_t;
 
@@ -123,7 +123,12 @@ int                 perftest_gpu_mode_from_string(const char *s,
  */
 int  perftest_gpu_stage_to_nic  (struct perftest_gpu_buffer *buf, size_t len);
 int  perftest_gpu_stage_from_nic(struct perftest_gpu_buffer *buf, size_t len);
+int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
+                                      size_t off, size_t len);
+int perftest_gpu_stage_to_nic_range(perftest_gpu_buffer_t *buf,
+                                    size_t off, size_t len);          
 
+                           
 /* 给 print / 报告用的策略名. */
 const char *perftest_gpu_alloc_strategy_name(perftest_gpu_alloc_strategy_t s);
 

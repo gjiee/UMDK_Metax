@@ -21,6 +21,8 @@
 
 #include "perftest_parameters.h"
 #include "perftest_resources.h"
+#include "perftest_gpu_alloc.h"
+#include "perftest_cuda_loader.h"
 
 #define PERFTEST_HALF (2)
 #define PERFTEST_ITERS_99 (0.99)
@@ -676,9 +678,11 @@ static void init_jfs_wr_opcode(urma_jfs_wr_t *wr, const perftest_config_t *cfg)
 {
     switch (cfg->cmd) {
         case PERFTEST_READ_LAT:
+	case PERFTEST_READ_LAT_GPU:
             wr->opcode = URMA_OPC_READ;
             break;
         case PERFTEST_WRITE_LAT:
+	case PERFTEST_WRITE_LAT_GPU:
             init_jfs_write_wr_opcode(wr, cfg);
             break;
         case PERFTEST_SEND_LAT:
@@ -929,9 +933,11 @@ static void init_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, perftest_
 {
     switch (cfg->cmd) {
         case PERFTEST_READ_LAT:
+	case PERFTEST_READ_LAT_GPU:	
             init_read_jfs_wr_sg(wr, ctx, cfg, i, j);
             return;
         case PERFTEST_WRITE_LAT:
+	case PERFTEST_WRITE_LAT_GPU: 
             init_write_jfs_wr_sg(wr, ctx, cfg, i, j);
             return;
         case PERFTEST_SEND_LAT:
@@ -1362,6 +1368,12 @@ static void *run_write_lat_duplex(void *arg)
     uint64_t rcnt = 0;
     run_test_ctx_t *run_ctx = &ctx->run_ctx;
     uint64_t rid = run_ctx->rid;
+    //get GPU proxy memory, gbuf has the GPU memory, local buffer is shadow memory
+    perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, id);
+    if(gbuf &&  gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY)
+    {
+        perftest_cuda_set_current_ctx();
+    }
 
     urma_cr_t *cr = calloc(1, sizeof(urma_cr_t) * cfg->jfc_depth);
     if (cr == NULL) {
@@ -1380,9 +1392,17 @@ static void *run_write_lat_duplex(void *arg)
 
     while (scnt < cfg->iters || ccnt < cfg->iters || rcnt < cfg->iters ||
         (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
+        
         if ((rcnt < cfg->iters || cfg->time_type.bs.duration == 1) && !(scnt < 1 && is_server)) {
             rcnt += cfg->jfs_post_list;
             while (*poll_buf != (char)(rcnt / cfg->jfs_post_list) && run_ctx->state != END_STATE) {};
+            //For proxy
+            if (run_ctx->state != END_STATE && gbuf &&  gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY) {
+                if (perftest_gpu_stage_from_nic_range(gbuf, 0, cfg->size) != 0) {
+                    fprintf(stderr, "stage_from_nic failed, id:%u, rcnt:%lu\n", id, rcnt);
+                    goto free_cr;
+                }
+            }
         }
 
         if (scnt < cfg->iters || cfg->time_type.bs.duration == 1) {
@@ -1391,6 +1411,13 @@ static void *run_write_lat_duplex(void *arg)
             }
 
             scnt += cfg->jfs_post_list;
+            //For proxy 
+            if (gbuf && gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY) {
+                if (perftest_gpu_stage_to_nic_range(gbuf, ctx->buf_size, cfg->size) != 0) {
+                    fprintf(stderr, "stage_to_nic failed, id:%u, scnt:%lu\n", id, scnt);
+                    goto free_cr;
+                }
+            }
             *post_buf = (char)(scnt / cfg->jfs_post_list);
 
             urma_jfs_wr_t *wr = &run_ctx->jfs_wr[id * cfg->jfs_post_list];

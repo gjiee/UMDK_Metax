@@ -7,7 +7,6 @@
  *   "NVIDIA CUDA + dma-buf" 内存后端的占位实现. 对应 RDMA perftest
  *   src/cuda_memory.c 与 src/cuda_loader.c 的合并骨架.
  *
- * 怎么实现 (How, 给内核老兵):
  *   传统 RDMA over GPU 有两条路, URMA 走 dma-buf 这条:
  *
  *     用户态:

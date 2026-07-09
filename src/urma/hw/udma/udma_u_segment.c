@@ -14,6 +14,13 @@
 #include "udma_u_common.h"
 #include "udma_u_segment.h"
 
+struct udma_register_seg_ucmd {
+	uint32_t is_gpu_seg;
+	uint32_t reserved;
+};
+
+
+
 static void udma_u_init_seg_cfg(urma_context_t *urma_ctx, urma_seg_cfg_t *seg_cfg,
 				struct udma_u_segment *seg)
 {
@@ -27,6 +34,7 @@ static void udma_u_init_seg_cfg(urma_context_t *urma_ctx, urma_seg_cfg_t *seg_cf
 	seg->urma_tseg.token_id = seg_cfg->token_id;
 	seg->len = seg_cfg->len;
 	seg->va = seg_cfg->va;
+	seg->is_gpu_seg = (seg_cfg->is_gpu_seg != 0);   // for GDR TEST
 	if (seg_cfg->flag.bs.token_policy != URMA_TOKEN_NONE) {
 		seg->token_value.token = seg_cfg->token_value.token;
 		seg->token_value_valid = true;
@@ -92,11 +100,18 @@ static int udma_exec_register_seg_cmd(urma_context_t *urma_ctx,
 				      urma_seg_cfg_t *seg_cfg,
 				      urma_target_seg_t *urma_tseg)
 {
+	struct udma_register_seg_ucmd ucmd = { 0 }; //GDR TEST
 	urma_cmd_udrv_priv_t udata = {};
 	int ret;
 
 	if (!to_udma_u_ctx(urma_ctx)->sva_sep_mode_en && seg_cfg->flag.bs.non_pin)
 		return 0;
+	//fill the GPU info
+	if (seg_cfg->is_gpu_seg) {
+		ucmd.is_gpu_seg = 1;
+		udata.in_addr = (uint64_t)(uintptr_t)&ucmd;
+		udata.in_len = (uint32_t)sizeof(ucmd);
+	}
 
 	ret = urma_cmd_register_seg(urma_ctx, urma_tseg, seg_cfg, &udata);
 	if (ret)
@@ -128,7 +143,7 @@ static void udma_u_ungrant_seg(struct udma_u_segment *seg)
 	if (ret)
 		UDMA_LOG_ERR("ungrant segment failed, ret = %d.\n", ret);
 }
-
+// kernel entry
 urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 				       urma_seg_cfg_t *seg_cfg)
 {
@@ -146,14 +161,25 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 	}
 
 	udma_u_init_seg_cfg(urma_ctx, seg_cfg, seg);
+	
+	if (!seg->is_gpu_seg) {                       /* GPU no need GRANT FOR GDR TEST */
+		ret = udma_u_grant_segment(seg);
+		if (ret) {
+			UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",
+				     seg_cfg->flag.bs.access, ret);
+			goto err_ummu_grant;
+		}
+	}
 
-	ret = udma_u_grant_segment(seg);
+
 	if (ret) {
 		UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",
 			     seg_cfg->flag.bs.access, ret);
 		goto err_ummu_grant;
 	}
-
+	fprintf(stderr, "ENTER udma_u_register_seg va=%p len=%lu\n",
+        (void *)seg_cfg->va, seg_cfg->len);
+		
 	ret = udma_exec_register_seg_cmd(urma_ctx, seg_cfg, &seg->urma_tseg);
 	if (ret)
 		goto err_pin_segment;
@@ -183,7 +209,8 @@ urma_status_t udma_u_unregister_seg(urma_target_seg_t *target_seg)
 	}
 
 common_process:
-	udma_u_ungrant_seg(seg);
+	if (!seg->is_gpu_seg) //GDR TEST, GPU NO GRANT
+		udma_u_ungrant_seg(seg);
 	seg->token_value.token = 0;
 	free(seg);
 
@@ -252,7 +279,7 @@ urma_status_t udma_u_unimport_seg(urma_target_seg_t *target_seg)
  *           ...
  *       };
  *
- * 怎么实现 (How, 给内核老兵):
+ * 怎么实现 
  *   用户态这一层做的事和现有 udma_u_register_seg() 几乎一样, 区别只有两点:
  *
  *     1) 不再调 ummu_grant() 把 va 翻译成 IPA (因为 dma-buf 由内核
@@ -275,42 +302,6 @@ urma_status_t udma_u_unimport_seg(urma_target_seg_t *target_seg)
  *   - 函数体只 print + 返回 NULL, 假装"驱动还不支持".
  *   - 同时给一个 udma_u_query_dmabuf_caps 的 stub.
  *
- * 给内核老兵的提示:
  *   你以前在 RDMA peermem 路径下熟悉的 nvidia_p2p_get_pages() 这条不要走,
  *   URMA 内核侧只走 dma-buf, 维护更简单且与 5.x 内核 mainline 一致.
  * ========================================================================= */
-
-#include <errno.h>
-
-urma_target_seg_t *udma_u_register_seg_dmabuf(urma_context_t *urma_ctx,
-					      urma_seg_cfg_t *seg_cfg,
-					      int dmabuf_fd,
-					      uint64_t offset)
-{
-	(void)urma_ctx;
-	(void)seg_cfg;
-	UDMA_LOG_ERR("udma_u_register_seg_dmabuf: stub called fd=%d off=%lu, "
-		     "ABI not yet enabled -- returning NULL (ENOTSUP).\n",
-		     dmabuf_fd, (unsigned long)offset);
-	errno = EOPNOTSUPP;
-	return NULL;
-}
-
-urma_status_t udma_u_query_dmabuf_caps(urma_device_t *dev, void *caps_out)
-{
-	(void)dev;
-	(void)caps_out;
-	/*
-	 * 真实现 (待 ABI 启用):
-	 *   struct udma_u_dev *udma_dev = to_udma_u_dev(dev);
-	 *   caps->support_dmabuf  = udma_dev->fw_caps.dmabuf;
-	 *   caps->support_dynamic = udma_dev->fw_caps.dmabuf_dynamic;
-	 *   caps->max_seg_size    = udma_dev->fw_caps.max_seg_size;
-	 *   caps->supported_alignments = (1u << 12) | (1u << 21);
-	 *
-	 * 当前不知道具体内核侧 fw_caps 字段是否已经提供 dmabuf 能力位, 所以
-	 * 一律返回"不支持". perftest 拿到这个就走 host-proxy 路径.
-	 */
-	UDMA_LOG_ERR("udma_u_query_dmabuf_caps: stub -> support=0\n");
-	return URMA_SUCCESS;
-}

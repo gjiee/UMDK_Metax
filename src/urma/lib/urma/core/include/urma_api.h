@@ -19,6 +19,11 @@
 extern "C" {
 #endif
 
+
+#define GA_LOG(fmt, ...) \
+    fprintf(stderr, "[gpu-alloc] %s: " fmt "\n", __func__, ##__VA_ARGS__)
+
+
 /**
  * Init urma environment.
  * @param[in] [Required] conf: urma init attr, a random uasid will be assigned when conf is null.

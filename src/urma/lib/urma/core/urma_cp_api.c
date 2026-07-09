@@ -2774,7 +2774,6 @@ urma_target_seg_t *urma_register_seg(urma_context_t *ctx, urma_seg_cfg_t *seg_cf
         errno = EINVAL;
         return NULL;
     }
-
     urma_seg_cfg_t tmp_cfg = *seg_cfg; // The const variable cannot be directly modified.
     if (seg_cfg->flag.bs.token_id_valid == URMA_TOKEN_ID_INVALID && ctx->dev->type == URMA_TRANSPORT_UB) {
         tmp_cfg.token_id = urma_alloc_token_id(ctx);
@@ -2783,7 +2782,13 @@ urma_target_seg_t *urma_register_seg(urma_context_t *ctx, urma_seg_cfg_t *seg_cf
         }
         tmp_cfg.flag.bs.token_id_valid = URMA_TOKEN_ID_VALID; // If not set, ubcore verification fails.
     }
+    fprintf(stderr, "ctx dev=%s type=%d ops=%p register_seg=%p\n",
+        ctx->dev->name,
+        ctx->dev->type,
+        (void *)ops,
+        (void *)ops->register_seg);
 
+        
     seg = ops->register_seg(ctx, &tmp_cfg);
     if (seg == NULL) {
         if (seg_cfg->flag.bs.token_id_valid == URMA_TOKEN_ID_INVALID && ctx->dev->type == URMA_TRANSPORT_UB) {

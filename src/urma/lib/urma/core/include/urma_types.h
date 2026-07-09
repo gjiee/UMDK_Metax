@@ -278,6 +278,7 @@ typedef struct urma_device_cap {
     uint32_t max_fetch_and_xor_size;
     urma_atomic_feature_t atomic_feat; /* [Public] support atomic feature of device */
     uint16_t trans_mode;               /* [Public] bit OR of supported transport modes */
+    uint16_t reserved;
     uint16_t congestion_ctrl_alg;      /* [Public] one or more mode from urma_congestion_ctrl_alg_t */
     uint32_t ceq_cnt;                  /* [Public] ceq_cnt */
     uint32_t max_tp_in_tpg;            /* [Public] max tp in tpg */
@@ -897,19 +898,13 @@ typedef struct urma_ubva {
  *           uint64_t dmabuf_offset;      // *** NEW, offset in dma-buf ***
  *       };
  *
- * 给内核老兵的提示 (How):
- *   - mem_type 为何要在 flag 里再开一份, 而不是单看 dmabuf_fd != -1?
- *     答: 兼容老调用方按值拷贝 urma_seg_cfg 时不会带新字段; 老路径里
- *     dmabuf_fd 的内存默认是 0, 0 在 fd 语义上代表 stdin, 不是哨兵.
- *     所以必须 mem_type 显式区分.
- *   - non_pin 与 dmabuf 互斥的原因: dma-buf 已经由 exporter 决定 pinned
- *     与否, 重复语义会让内核 ubcore 处理 movable dmabuf 时混乱.
- *
  * 当前阶段:
  *   下面的结构 *本次 commit 不真改*. 真正改动需要 (a) liburma + (b) uburma
  *   ioctl 头 + (c) ubcore + (d) udma 同步 PR. 完整 patch 清单见
  *   docs/urma_gdr_analysis.md \xc2\xa75.1.
  * ======================================================================= */
+
+
 typedef union urma_reg_seg_flag {
     struct {
         uint32_t token_policy   : 3; /* 0: URMA_TOKEN_NONE.
@@ -930,6 +925,7 @@ typedef union urma_reg_seg_flag {
                                         1: segment with user iova addr. */
         uint32_t token_id_valid : 1; /* 0: token id in cfg is invalid.
                                         1: token id in cfg is valid. */
+
         uint32_t reserved       : 18;
     } bs;
     uint32_t value;
@@ -1000,6 +996,7 @@ typedef struct urma_seg_cfg {
     urma_reg_seg_flag_t flag;
     uint64_t user_ctx;
     uint64_t iova; /* user iova, maybe zero-based-address */
+    uint32_t is_gpu_seg; //for GDR test
     /*
      * GDR ABI 扩展位置 (comment only, 当前未真正添加):
      *
