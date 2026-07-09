@@ -10,7 +10,7 @@
 #define MAP_INDEX_MASK 0xfffffff
 #define MAP_INDEX_SHIFT 4
 
-#define UDMA_SEGMENT_ACCESS_GUARD (1UL << 5)
+#define UDMA_SEGMENT_ACCESS_GUARD 0xf
 
 #define UDMA_CQE_COALESCE_SHIFT 10
 #define UDMA_CQE_COALESCE_CNT_MAX (1 << UDMA_CQE_COALESCE_SHIFT)
@@ -40,6 +40,10 @@
 #define UDMA_INTER_ERR 1
 #define UDMA_CQE_DEFAULT_SUBSTATUS 0
 
+/*
+ * FIX (SYNC): 本地未使用 (UMDK 内无任何引用), 保留自旧版抄本以防有隐藏依赖,
+ * 官方 br_openEuler_24.03_LTS_SP3 分支的 udma_abi.h 里没有这一条。
+ */
 #define UDMA_MAX_GRANT_SIZE 0xFFFFFFFFF000
 
 #define UDMA_TID_SHIFT 8U
@@ -50,6 +54,7 @@ enum udma_jetty_type {
 	UDMA_CCU_JETTY_TYPE,
 	UDMA_NORMAL_JETTY_TYPE,
 	UDMA_URMA_NORMAL_JETTY_TYPE,
+	UDMA_LOCK_BUFFER_JETTY_TYPE,
 	UDMA_URMA_EX_JETTY_TYPE,
 	UDMA_JETTY_TYPE_MAX
 };
@@ -76,7 +81,8 @@ struct udma_create_jetty_ucmd {
 	__u32 pi_type : 1;
 	__u32 non_pin : 1;
 	__u32 is_hugepage : 1;
-	__u32 rsv : 29;
+	__u32 dtu_en : 1;
+	__u32 rsv : 28;
 	__u32 jetty_type;
 	__aligned_u64 jfr_sleep_buf;
 	__u32 jfs_id;
@@ -93,7 +99,9 @@ struct udma_create_jfc_ucmd {
 	__u32 mode; /* 0: normal, 1: user stars, 2: kernel stars */
 	__aligned_u64 db_addr;
 	__u32 is_hugepage : 1;
-	__u32 rsv : 31;
+	__u32 dtu_en : 1;
+	__u32 ccu_cqe_flag : 1;
+	__u32 rsv : 29;
 	__u32 rsv1;
 };
 
@@ -104,8 +112,14 @@ struct udma_create_ctx_resp {
 	__u32 dump_aux_info : 1;
 	__u32 sq_reserved : 1;
 	__u32 hugepage_enable : 1;
+	__u32 atomic_add_en : 1;
 	__u32 sva_sep_mode_en : 1;
-	__u32 rsv : 19;
+	__u32 u_dtu_enable : 1;
+	__u32 st64b_en : 1;
+	__u32 lock_buffer_en : 1;
+	__u32 ccu_jfc_property_en : 1;
+	__u32 lock_buf_bb_shift : 8;
+	__u32 rsv : 5;
 	__u32 ue_id;
 	__u32 chip_id;
 	__u32 die_id;
@@ -115,6 +129,8 @@ struct udma_create_ctx_resp {
 	__u32 rsv1;
 	__aligned_u64 sq_reserved_va;
 	__aligned_u64 sq_reserved_len;
+	__aligned_u64 dtu_va_base;
+	__aligned_u64 dtu_va_size;
 };
 
 struct udma_create_jfr_resp {
