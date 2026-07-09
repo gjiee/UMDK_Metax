@@ -937,25 +937,44 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
         if (j < seg_num) {
             seg_cfg.va = (uint64_t)ctx->local_buf[j];
             /*
-             * FIX: is_gpu_seg 必须根据"这段内存实际是不是真的分配到了 GPU
-             * 显存"来定，不能只看命令名字是不是 *_gpu。--gpu-mode=proxy
-             * 在跑的机器没装 CUDA/GPU 驱动时会自动降级成 PERFTEST_GPU_ALLOC_MEMALIGN
-             * (普通 memalign 出来的 host 堆内存)。如果这里只看 cfg->cmd,
-             * 降级之后的 host 段仍然会被打上 is_gpu_seg=1 传给内核，内核会
-             * 拿着这个"假 GPU VA"（其实是普通堆地址）去调 GPU pin 接口，
-             * 必然失败——同时会触发 udma_u_segment.c 里"GPU 段没 grant 过、
-             * 失败时却被 ungrant"那条 bug（已修复），两个问题叠加正是
-             * 之前那次超时卡死的根因。
-             * 只有 ctx->gpu_bufs[j].strategy 真的是 GPU 相关策略
-             * (非 MEMALIGN/NONE) 才标 is_gpu_seg=1；client 侧没有真 GPU、
-             * 自动降级成 MEMALIGN 的那一路会正确走普通 host 段注册。
+             * FIX (v2): is_gpu_seg 必须根据"实际交给 urma_register_seg() 的
+             * 这个 va 是不是真的一个 GPU 设备指针"来定，不能只看命令名字是不是
+             * *_gpu，也不能只是排除 MEMALIGN/NONE（v1 版本的这种"黑名单"写法
+             * 是错的，会把 HOST_PROXY 误判成真 GPU，见下面解释）。
+             *
+             * 参考 perftest_gpu_alloc.c 各 strategy 实际 out->addr 的取值:
+             *   - PERFTEST_GPU_ALLOC_PEERMEM (--gpu-mode=peermem):
+             *       out->addr = dptr，真实的 cuMemAlloc() GPU 设备指针，
+             *       urma_register_seg() 拿到的就是 GPU VA，需要走内核
+             *       nvidia_p2p_get_pages 那条 pin 路径 -> is_gpu_seg = 1。
+             *   - PERFTEST_GPU_ALLOC_GDR (dma-buf 方式，理论上同理):
+             *       out->addr = dptr，同样是真实 GPU VA -> is_gpu_seg = 1。
+             *   - PERFTEST_GPU_ALLOC_HOST_PROXY (--gpu-mode=proxy):
+             *       out->addr = shadow，是 cuMemAllocHost/malloc 出来的
+             *       **host** 影子缓冲区；真正的 GPU 指针存在 out->gpu_ptr 里，
+             *       只在 perftest_gpu_stage_to_nic()/stage_from_nic() 里靠
+             *       显式 cuMemcpy 做拷贝，网卡/内核从头到尾看到、注册的都是
+             *       host 内存。proxy 模式的语义就是"host 注册 + 应用层 copy"，
+             *       所以哪怕这台机器真的有 GPU、真的走通了 HOST_PROXY 策略，
+             *       也不能标 is_gpu_seg=1，否则内核会拿着这个其实是
+             *       cuMemAllocHost 出来的地址去调 GPU pin 接口，必然失败——
+             *       同时会触发 udma_u_segment.c 里"GPU 段没 grant 过、失败时
+             *       却被 ungrant"那条 bug（已修复），两个问题叠加正是之前
+             *       那次超时卡死的根因。
+             *   - PERFTEST_GPU_ALLOC_MEMALIGN / NONE:
+             *       纯 host 内存（没 GPU 或强制降级的兜底路径） -> is_gpu_seg = 0。
+             *
+             * 所以这里必须用"白名单"而不是"黑名单": 只有 strategy 真的是
+             * PEERMEM 或 GDR 时才标 is_gpu_seg=1；HOST_PROXY/MEMALIGN/NONE
+             * 以及以后任何新增的 strategy，默认都当成 host 段处理，这样才是
+             * fail-safe 的。
              */
             {
                 perftest_gpu_buffer_t *gbuf = (ctx->gpu_bufs != NULL && j < ctx->gpu_bufs_n)
                     ? &ctx->gpu_bufs[j] : NULL;
                 bool truly_gpu = gbuf != NULL &&
-                    gbuf->strategy != PERFTEST_GPU_ALLOC_MEMALIGN &&
-                    gbuf->strategy != PERFTEST_GPU_ALLOC_NONE;
+                    (gbuf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
+                     gbuf->strategy == PERFTEST_GPU_ALLOC_GDR);
                 seg_cfg.is_gpu_seg = truly_gpu ? 1 : 0;
             }
             if (ctx->urma_ctx->dev->type == URMA_TRANSPORT_UB) {
