@@ -89,6 +89,25 @@ int  perftest_cuda_mem_alloc_host(size_t size, void **out_hptr);
 int  perftest_cuda_mem_free_host(void *hptr);
 
 /*
+ * FIX: GPUDirect RDMA 官方文档 (docs.nvidia.com/cuda/gpudirect-rdma, "3.2
+ * Pinning GPU memory") 明确要求: 把 GPU 指针交给内核驱动调
+ * nvidia_p2p_get_pages() 之前, 用户态必须先对这段地址调一次
+ *   cuPointerSetAttribute(&flag=1, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS, ptr)
+ * 目的是让 CUDA driver 对这段内存启用"同步内存操作"模式 (memops 在返回前
+ * 保证跟 GPU 侧完成同步), 这是 BAR mapping 跟 CUDA API 保持一致视图的
+ * 前提。用旧式 tokens (cuPointerGetAttribute(P2P_TOKENS,...)) 会隐式启用
+ * 同一个行为, 但我们走的是"tokens=0, 同进程"这条现代路径, 没有调
+ * GetAttribute(P2P_TOKENS), 所以必须显式调这个 Set 接口, 否则内核侧
+ * nvidia_p2p_get_pages() 会返回 -EINVAL —— 跟地址/长度是否 64KB 对齐、
+ * GPU 型号支不支持 GPUDirect RDMA 都没关系, 纯粹是少了这一步握手。
+ *
+ * @dptr: cuMemAlloc() 返回的 GPU 设备指针 (CUdeviceptr, 这里按 void* 传递,
+ *        内部转换)。返回 0 成功, -1 失败 (loader 未初始化, 或
+ *        cuPointerSetAttribute 本身报错)。
+ */
+int  perftest_cuda_set_sync_memops(void *dptr);
+
+/*
  * D2H / H2D 拷贝 (cuMemcpyDtoH / cuMemcpyHtoD).
  *   - perftest_gpu_alloc 中 proxy 模式的 stage_to_nic / stage_from_nic 真
  *     实现就调这两个;
