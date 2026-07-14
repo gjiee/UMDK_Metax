@@ -209,10 +209,34 @@ static int has_kernel_module(const char *name)
     return found;
 }
 
+/*
+ * FIX: nvidia_p2p_get_pages() 强制要求 virtual_address 和 length 都
+ * 64KB 对齐 (NVRM_P2P_PAGESIZE_BIG_64K), 内核侧 udma_gpu_pin_seg_pages()
+ * 会把 [cfg->va, cfg->va+cfg->len) 分别向下/向上 round 到 64KB 边界再去
+ * 调这个函数 (udma_gpu_align_len())。如果这里 cuMemAlloc() 只按用户
+ * 请求的原始 size 分配 (比如 write_lat_gpu -s 102400 时 buf_len 大概
+ * 200KB, 不是 64KB 整数倍), 内核那边向上 round 出来的 mapped_size 就会
+ * 超出这段 CUDA 分配实际覆盖的 GPU VA 范围 (padding 到了没分配过的
+ * 显存地址), NVIDIA 驱动在自己内部的 UVM VA space 表里找不到完整覆盖
+ * 这段 padded 范围的记录, 直接返回 -EINVAL —— 这正是
+ * "GPU P2P get_pages failed ... ret=-22" 的根因, 跟 GPUDirect
+ * RDMA 支持与否、GPU 型号 (V100 完全支持)、驱动配置都没关系, 纯粹是
+ * 这里分配的显存比内核实际要 pin 的范围小。
+ * 修复: 分配时按 PERFTEST_GPU_SEG_ALIGN(64KB) 向上取整, 保证
+ * cuMemAlloc 出来的显存范围本身就完整覆盖内核 round 之后的
+ * [gpu_va, gpu_va+mapped_size)。
+ */
+#define PERFTEST_GPU_SEG_ALIGN ((size_t)(64u * 1024u))
+static size_t align_up_size(size_t size, size_t align)
+{
+    return (size + align - 1) & ~(align - 1);
+}
+
 static int try_alloc_peermem(size_t size, size_t alignment,
                              perftest_gpu_buffer_t *out)
 {
     void *dptr = NULL;
+    size_t alloc_size = align_up_size(size, PERFTEST_GPU_SEG_ALIGN);
     (void)alignment;
 
     if (forced_fail(PERFTEST_GPU_ALLOC_PEERMEM)) {
@@ -239,21 +263,23 @@ static int try_alloc_peermem(size_t size, size_t alignment,
         GA_LOG("FAIL: cuCtxCreate");
         return -1;
     }
-    if (perftest_cuda_mem_alloc(size, &dptr) != 0) {
+    if (perftest_cuda_mem_alloc(alloc_size, &dptr) != 0) {
         GA_LOG("FAIL: cuMemAlloc");
         return -1;
     }
 
     out->addr          = dptr;     /* URMA register_seg 直接把 dptr 当 va */
     out->gpu_ptr       = dptr;
-    out->size          = size;
+    out->size          = alloc_size;
     out->dmabuf_fd     = -1;
     out->dmabuf_offset = 0;
     out->strategy      = PERFTEST_GPU_ALLOC_PEERMEM;
 
-    GA_LOG("OK: dptr=%p size=%zu (URMA register_seg sees GPU va; "
-           "kernel ubcore pulls page list via peer_memory_client)",
-           dptr, size);
+    GA_LOG("OK: dptr=%p requested_size=%zu alloc_size=%zu (64KB-aligned so "
+           "kernel's nvidia_p2p_get_pages() 64KB-rounding stays within this "
+           "allocation; URMA register_seg sees GPU va, kernel ubcore pulls "
+           "page list via peer_memory_client)",
+           dptr, size, alloc_size);
     return 0;
 }
 
