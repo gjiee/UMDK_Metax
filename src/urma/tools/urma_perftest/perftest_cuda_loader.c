@@ -47,6 +47,14 @@ typedef uint64_t CUdeviceptr;
 #define CUDA_SUCCESS                                 0
 #define CU_CTX_MAP_HOST                              0x08
 #define CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD          0x1
+/*
+ * FIX: CUpointer_attribute 里跟 GPUDirect RDMA "pin 之前的握手" 相关的
+ * 那一个。数值来自 cuda.h 的稳定 ABI 枚举 (CU_POINTER_ATTRIBUTE_SYNC_MEMOPS
+ * = 6), 跟本文件其它属性常量 (PTR_ATTR_MEMORY_TYPE=2/IS_MANAGED=8/
+ * DEVICE_ORDINAL=9/RANGE_START_ADDR=11/RANGE_SIZE=12, 见 dump_cuda_ptr())
+ * 是同一套编号体系。
+ */
+#define CU_POINTER_ATTRIBUTE_SYNC_MEMOPS             6
 /* 在 cuda.h 里 cuMemGetHandleForAddressRange 的签名是:
  *   CUresult cuMemGetHandleForAddressRange(
  *       void *handle, CUdeviceptr dptr, size_t size,
@@ -71,6 +79,8 @@ typedef CUresult (*pfn_cuMemcpyHtoD)(CUdeviceptr dstDevice, const void *srcHost,
 typedef CUresult (*pfn_cuMemGetHandleForAddressRange)(
     void *handle, CUdeviceptr dptr, size_t size,
     int handleType, unsigned long long flags);
+typedef CUresult (*pfn_cuPointerSetAttribute)(
+    const void *value, int attribute, CUdeviceptr ptr);
 
 /* ---- 全局状态 ---- */
 static int        g_loaded;
@@ -94,6 +104,7 @@ DECL_SYM(cuMemFreeHost);
 DECL_SYM(cuMemcpyDtoH);
 DECL_SYM(cuMemcpyHtoD);
 DECL_SYM(cuMemGetHandleForAddressRange);
+DECL_SYM(cuPointerSetAttribute);
 
 //Change the context to current thread
 static int perftest_cuda_make_ctx_current(void)
@@ -186,6 +197,7 @@ int perftest_cuda_loader_init(void)
     LOAD(cuMemFreeHost,                     NULL);
     LOAD(cuMemcpyDtoH,                      "cuMemcpyDtoH_v2");
     LOAD(cuMemcpyHtoD,                      "cuMemcpyHtoD_v2");
+    LOAD(cuPointerSetAttribute,             NULL);
     /*
      * cuMemGetHandleForAddressRange 仅 CUDA Driver >= 12.2 提供, 早于此版本
      * 的驱动会 dlsym=NULL. 这条不是致命错: --gpu-mode=direct 会因此失败,
@@ -403,6 +415,30 @@ int perftest_cuda_mem_free(void *dptr)
     if (rc != CUDA_SUCCESS) {
         CL_LOG("cuMemFree(%p) -> %d", dptr, (int)rc); return -1;
     }
+    return 0;
+}
+
+int perftest_cuda_set_sync_memops(void *dptr)
+{
+    CUresult rc;
+    unsigned int flag = 1;
+
+    if (!g_loaded) { CL_LOG("loader not initialised"); return -1; }
+    if (g_cuPointerSetAttribute == NULL) {
+        CL_LOG("cuPointerSetAttribute not resolved (unexpectedly old libcuda.so.1?)");
+        return -1;
+    }
+
+    rc = g_cuPointerSetAttribute(&flag, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS,
+                                 (CUdeviceptr)(uintptr_t)dptr);
+    if (rc != CUDA_SUCCESS) {
+        CL_LOG("cuPointerSetAttribute(SYNC_MEMOPS, %p) -> %d", dptr, (int)rc);
+        return -1;
+    }
+
+    CL_LOG("ok: dptr=%p SYNC_MEMOPS=1 (required before handing this ptr to "
+           "nvidia_p2p_get_pages(), otherwise kernel-side pin fails -EINVAL)",
+           dptr);
     return 0;
 }
 

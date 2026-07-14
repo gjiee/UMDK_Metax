@@ -268,6 +268,22 @@ static int try_alloc_peermem(size_t size, size_t alignment,
         return -1;
     }
 
+    /*
+     * FIX: GPUDirect RDMA 官方手册 3.2 节 "Pinning GPU memory" 明确要求,
+     * 把 GPU 指针交给内核驱动调 nvidia_p2p_get_pages() 之前, 必须先对这段
+     * 地址显式调一次 cuPointerSetAttribute(CU_POINTER_ATTRIBUTE_SYNC_MEMOPS)。
+     * 我们走的是 "p2p_token=0/va_space=0, 同进程" 现代路径, 没有调
+     * 已废弃的 cuPointerGetAttribute(P2P_TOKENS,...) (那条路径会隐式启用
+     * 同样的行为), 所以这一步不能省略——漏了这步, 内核侧
+     * nvidia_p2p_get_pages() 会返回 -EINVAL, 跟地址/长度对齐、GPU 型号
+     * 完全无关, 之前排查到的"len=0x40000/0x80000 ret=-22"就是这个原因。
+     */
+    if (perftest_cuda_set_sync_memops(dptr) != 0) {
+        GA_LOG("FAIL: cuPointerSetAttribute(SYNC_MEMOPS) on dptr=%p", dptr);
+        (void)perftest_cuda_mem_free(dptr);
+        return -1;
+    }
+
     out->addr          = dptr;     /* URMA register_seg 直接把 dptr 当 va */
     out->gpu_ptr       = dptr;
     out->size          = alloc_size;
