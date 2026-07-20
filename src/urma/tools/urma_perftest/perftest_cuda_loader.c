@@ -44,15 +44,22 @@ typedef int      CUresult;          /* cuda.h: enum CUresult */
 typedef int      CUdevice;
 typedef void    *CUcontext;
 typedef uint64_t CUdeviceptr;
+/*
+ * FIX: 单独给 CUpointer_attribute 一个 typedef (而不是内联写 int), 纯粹是
+ * 规范化/可读性收益 —— ABI 上跟 int 完全一样 (cuda.h 里就是个普通 enum,
+ * 4 字节, 不会因为换个 typedef 名字改变调用约定), 之前那次 EINVAL 不是
+ * 这个类型名字的锅。
+ */
+typedef int      CUpointer_attribute;
 #define CUDA_SUCCESS                                 0
 #define CU_CTX_MAP_HOST                              0x08
 #define CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD          0x1
 /*
- * FIX: CUpointer_attribute 里跟 GPUDirect RDMA "pin 之前的握手" 相关的
- * 那一个。数值来自 cuda.h 的稳定 ABI 枚举 (CU_POINTER_ATTRIBUTE_SYNC_MEMOPS
- * = 6), 跟本文件其它属性常量 (PTR_ATTR_MEMORY_TYPE=2/IS_MANAGED=8/
+ * CUpointer_attribute 里跟 GPUDirect RDMA "pin 之前的握手" 相关的那一个。
+ * 数值来自 cuda.h 的稳定 ABI 枚举 (CU_POINTER_ATTRIBUTE_SYNC_MEMOPS = 6),
+ * 跟本文件其它属性常量 (PTR_ATTR_MEMORY_TYPE=2/IS_MANAGED=8/
  * DEVICE_ORDINAL=9/RANGE_START_ADDR=11/RANGE_SIZE=12, 见 dump_cuda_ptr())
- * 是同一套编号体系。
+ * 是同一套编号体系, 已经跟官方文档核对过。
  */
 #define CU_POINTER_ATTRIBUTE_SYNC_MEMOPS             6
 /* 在 cuda.h 里 cuMemGetHandleForAddressRange 的签名是:
@@ -60,6 +67,9 @@ typedef uint64_t CUdeviceptr;
  *       void *handle, CUdeviceptr dptr, size_t size,
  *       CUmemRangeHandleType handleType, unsigned long long flags);
  */
+
+_Static_assert(sizeof(CUdeviceptr) == 8, "CUdeviceptr must be 64-bit");
+_Static_assert(sizeof(uintptr_t) == 8, "uintptr_t must be 64-bit");
 
 /* ---- 函数指针类型 ---- */
 typedef CUresult (*pfn_cuInit)(unsigned int Flags);
@@ -70,6 +80,7 @@ typedef CUresult (*pfn_cuDeviceGetName)(char *name, int len, CUdevice dev);
 typedef CUresult (*pfn_cuCtxCreate)(CUcontext *pctx, unsigned int flags, CUdevice dev);
 typedef CUresult (*pfn_cuCtxDestroy)(CUcontext ctx);
 typedef CUresult (*pfn_cuCtxSetCurrent)(CUcontext ctx);
+typedef CUresult (*pfn_cuCtxGetCurrent)(CUcontext *pctx);
 typedef CUresult (*pfn_cuMemAlloc)(CUdeviceptr *dptr, size_t bytesize);
 typedef CUresult (*pfn_cuMemFree)(CUdeviceptr dptr);
 typedef CUresult (*pfn_cuMemAllocHost)(void **pp, size_t bytesize);
@@ -80,7 +91,15 @@ typedef CUresult (*pfn_cuMemGetHandleForAddressRange)(
     void *handle, CUdeviceptr dptr, size_t size,
     int handleType, unsigned long long flags);
 typedef CUresult (*pfn_cuPointerSetAttribute)(
-    const void *value, int attribute, CUdeviceptr ptr);
+    const void *value, CUpointer_attribute attribute, CUdeviceptr ptr);
+/*
+ * FIX: cuGetErrorName/cuGetErrorString —— 之前排查 cuPointerSetAttribute
+ * 返回 1 (CUDA_ERROR_INVALID_VALUE) 只能靠猜数字, 加上这两个之后所有
+ * CL_LOG 都能顺手打出符号名 + 官方文字描述, 以后再出现任何 CUresult != 0
+ * 都不用再去翻 cuda.h 对照表。
+ */
+typedef CUresult (*pfn_cuGetErrorName)(CUresult error, const char **pStr);
+typedef CUresult (*pfn_cuGetErrorString)(CUresult error, const char **pStr);
 
 /* ---- 全局状态 ---- */
 static int        g_loaded;
@@ -97,6 +116,7 @@ DECL_SYM(cuDeviceGetName);
 DECL_SYM(cuCtxCreate);
 DECL_SYM(cuCtxDestroy);
 DECL_SYM(cuCtxSetCurrent);
+DECL_SYM(cuCtxGetCurrent);
 DECL_SYM(cuMemAlloc);
 DECL_SYM(cuMemFree);
 DECL_SYM(cuMemAllocHost);
@@ -105,6 +125,29 @@ DECL_SYM(cuMemcpyDtoH);
 DECL_SYM(cuMemcpyHtoD);
 DECL_SYM(cuMemGetHandleForAddressRange);
 DECL_SYM(cuPointerSetAttribute);
+DECL_SYM(cuGetErrorName);
+DECL_SYM(cuGetErrorString);
+
+/*
+ * FIX: 统一的错误打印 helper, 优先用 cuGetErrorName/cuGetErrorString
+ * (需要 loader 已经把这两个符号解出来); 解不出来 (极老驱动) 就退化成
+ * 纯数字, 不会崩。
+ */
+static void cl_log_cuda_error(const char *what, CUresult rc)
+{
+    const char *name = NULL;
+    const char *desc = NULL;
+
+    if (g_cuGetErrorName != NULL)
+        (void)g_cuGetErrorName(rc, &name);
+    if (g_cuGetErrorString != NULL)
+        (void)g_cuGetErrorString(rc, &desc);
+
+    fprintf(stderr, "[cuda-loader] %s -> %d (%s): %s\n",
+            what, (int)rc,
+            name ? name : "unknown",
+            desc ? desc : "unknown");
+}
 
 //Change the context to current thread
 static int perftest_cuda_make_ctx_current(void)
@@ -191,6 +234,7 @@ int perftest_cuda_loader_init(void)
     LOAD(cuCtxCreate,                       "cuCtxCreate_v2");
     LOAD(cuCtxDestroy,                      "cuCtxDestroy_v2");
     LOAD(cuCtxSetCurrent,                   NULL);
+    LOAD(cuCtxGetCurrent,                   NULL);
     LOAD(cuMemAlloc,                        "cuMemAlloc_v2");
     LOAD(cuMemFree,                         "cuMemFree_v2");
     LOAD(cuMemAllocHost,                    "cuMemAllocHost_v2");
@@ -198,6 +242,8 @@ int perftest_cuda_loader_init(void)
     LOAD(cuMemcpyDtoH,                      "cuMemcpyDtoH_v2");
     LOAD(cuMemcpyHtoD,                      "cuMemcpyHtoD_v2");
     LOAD(cuPointerSetAttribute,             NULL);
+    LOAD(cuGetErrorName,                    NULL);
+    LOAD(cuGetErrorString,                  NULL);
     /*
      * cuMemGetHandleForAddressRange 仅 CUDA Driver >= 12.2 提供, 早于此版本
      * 的驱动会 dlsym=NULL. 这条不是致命错: --gpu-mode=direct 会因此失败,
@@ -394,15 +440,38 @@ void perftest_cuda_ctx_destroy(void)
 /* ---- memory ---- */
 int perftest_cuda_mem_alloc(size_t size, void **out_dptr)
 {
-    CUdeviceptr d;
+    CUdeviceptr d = 0;
     CUresult    rc;
-    if (!g_loaded || out_dptr == NULL) { CL_LOG("invalid arg"); return -1; }
+
+    if (!g_loaded || out_dptr == NULL || !g_ctx) {
+        CL_LOG("invalid state: loaded=%d out=%p ctx=%p",
+               g_loaded, (void *)out_dptr, g_ctx);
+        return -1;
+    }
+
+    /*
+     * FIX: CUDA context 是 per-thread 状态 (current context), 不是
+     * per-process 的。g_ctx 这个 CUcontext 对象本身在哪个线程创建都
+     * 一样, 但"哪个 context 对当前线程生效"必须每次用之前显式
+     * cuCtxSetCurrent() 一遍——如果调用这个函数的线程跟当初
+     * perftest_cuda_ctx_create() 的线程不是同一个 (或者中间有别的
+     * CUDA 调用换过 current context), 这里不重新 set 的话,
+     * cuMemAlloc 本身可能就在错误的 (甚至没有) context 下执行。
+     */
+    rc = g_cuCtxSetCurrent(g_ctx);
+    if (rc != CUDA_SUCCESS) {
+        cl_log_cuda_error("cuCtxSetCurrent", rc);
+        return -1;
+    }
+
     rc = g_cuMemAlloc(&d, size);
     if (rc != CUDA_SUCCESS) {
-        CL_LOG("cuMemAlloc(%zu) -> %d", size, (int)rc); return -1;
+        cl_log_cuda_error("cuMemAlloc", rc);
+        return -1;
     }
     *out_dptr = (void *)(uintptr_t)d;
-    CL_LOG("ok: dptr=%p size=%zu", *out_dptr, size);
+    CL_LOG("ok: ctx=%p dptr=%p cuda_va=0x%llx size=%zu",
+           g_ctx, *out_dptr, (unsigned long long)d, size);
     return 0;
 }
 
@@ -420,19 +489,59 @@ int perftest_cuda_mem_free(void *dptr)
 
 int perftest_cuda_set_sync_memops(void *dptr)
 {
-    CUresult rc;
     unsigned int flag = 1;
+    CUdeviceptr  cuda_ptr;
+    CUcontext    current_ctx = NULL;
+    CUresult     rc;
 
-    if (!g_loaded) { CL_LOG("loader not initialised"); return -1; }
-    if (g_cuPointerSetAttribute == NULL) {
-        CL_LOG("cuPointerSetAttribute not resolved (unexpectedly old libcuda.so.1?)");
+    if (!g_loaded || !g_ctx || !g_cuPointerSetAttribute || !dptr) {
+        CL_LOG("invalid state: loaded=%d ctx=%p fn=%p dptr=%p",
+               g_loaded, g_ctx, (void *)g_cuPointerSetAttribute, dptr);
         return -1;
     }
 
-    rc = g_cuPointerSetAttribute(&flag, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS,
-                                 (CUdeviceptr)(uintptr_t)dptr);
+    cuda_ptr = (CUdeviceptr)(uintptr_t)dptr;
+
+    /*
+     * FIX: 同 perftest_cuda_mem_alloc() —— current context 是 per-thread
+     * 状态, 调用这个函数的线程未必就是当初创建/持有 g_ctx 的那个线程
+     * (或者线程没变, 但期间别的 CUDA 调用把 current context 换掉了)。
+     * 官方文档写得很明确: 如果当前 context 访问不到这个 ptr,
+     * cuPointerSetAttribute 就会返回 CUDA_ERROR_INVALID_VALUE —— 这正是
+     * 之前反复看到 "-> 1" 最可能的原因, 不是地址/长度/attribute 编号错。
+     */
+    rc = g_cuCtxSetCurrent(g_ctx);
     if (rc != CUDA_SUCCESS) {
-        CL_LOG("cuPointerSetAttribute(SYNC_MEMOPS, %p) -> %d", dptr, (int)rc);
+        cl_log_cuda_error("cuCtxSetCurrent", rc);
+        return -1;
+    }
+
+    /*
+     * 显式回读一次, 而不是"set 成功就默认它生效了"——两者理论上应该一致,
+     * 但既然上一轮已经在这个调用上栽了一次, 干脆多这一步交叉验证,
+     * 免得又靠猜。
+     */
+    if (g_cuCtxGetCurrent != NULL) {
+        rc = g_cuCtxGetCurrent(&current_ctx);
+        if (rc != CUDA_SUCCESS) {
+            cl_log_cuda_error("cuCtxGetCurrent", rc);
+            return -1;
+        }
+        if (current_ctx != g_ctx) {
+            CL_LOG("context mismatch after cuCtxSetCurrent: expected=%p current=%p",
+                   g_ctx, current_ctx);
+            return -1;
+        }
+    }
+
+    CL_LOG("cuPointerSetAttribute enter: ctx=%p dptr=%p cuda_ptr=0x%llx "
+           "flag=%u attr=%d fn=%p",
+           current_ctx, dptr, (unsigned long long)cuda_ptr, flag,
+           (int)CU_POINTER_ATTRIBUTE_SYNC_MEMOPS, (void *)g_cuPointerSetAttribute);
+
+    rc = g_cuPointerSetAttribute(&flag, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS, cuda_ptr);
+    if (rc != CUDA_SUCCESS) {
+        cl_log_cuda_error("cuPointerSetAttribute(SYNC_MEMOPS)", rc);
         return -1;
     }
 
