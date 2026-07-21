@@ -23,6 +23,7 @@
 #include "perftest_resources.h"
 #include "perftest_gpu_alloc.h"
 #include "perftest_cuda_loader.h"
+#include "perftest_validation.h"
 
 #define PERFTEST_HALF (2)
 #define PERFTEST_ITERS_99 (0.99)
@@ -1531,6 +1532,122 @@ free_cr:
 }
 
 
+/*
+ * write_lat 校验 (两层, 互不替代):
+ *
+ * 1) perftest_validation_* (linux-rdma 风格 seed pattern)
+ *    - Host send: fill_host
+ *    - peermem/GDR send: fill_gpu = host 生成 + H2D
+ *    - peermem/GDR recv 测后: check_gpu = D2H + 比对
+ *    - 只覆盖 payload 前 size-1 字节 (最后 1 字节是 flag)
+ *
+ * 2) gdr-eye 肉眼串 (可选, 需 -s >= eye_min)
+ *    - Host 再在 send[0] 覆盖写入 "test GDR write"
+ *    - GPU 测前 H2D INIT, 测后 D2H 打印
+ *    - 覆盖 seed 前缀, 因此 eye 开启时 GPU 侧以 magic 为准, 不再做 seed check
+ */
+static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t *cfg)
+{
+    uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
+    uint32_t i;
+    uint32_t payload;
+    bool eye = ((size_t)cfg->size >= perftest_gdr_eye_min_size());
+
+    if (cfg->size < 2) {
+        return;
+    }
+    payload = cfg->size - 1u;
+
+    if (!eye) {
+        (void)fprintf(stderr,
+            "[gdr-verify] eye magic SKIP (-s %u < %zu); still running seed "
+            "validation on %u-byte payload (seed=0x%x). use -s 32 for "
+            "\"%s\" eye dump\n",
+            cfg->size, perftest_gdr_eye_min_size(), payload,
+            PERFTEST_WRITE_LAT_VALID_SEED, perftest_gdr_eye_magic());
+    }
+
+    for (i = 0; i < seg_num; i++) {
+        perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
+        bool is_dev = perftest_gpu_needs_cpu_flag(gbuf);
+        void *recv_base = ctx->local_buf[i];
+        void *send_base = (char *)ctx->local_buf[i] + ctx->buf_size;
+
+        /*
+         * 填充本端 send 半区: GPU VA 必须 H2D, 不能 CPU 直接写.
+         * (非对称时 Host 对端走 fill_host; 若本端也是 peermem 则 H2D.)
+         */
+        if (perftest_validation_fill(send_base, payload,
+                PERFTEST_WRITE_LAT_VALID_SEED, is_dev) != 0) {
+            (void)fprintf(stderr,
+                "[validation] fill send failed seg=%u is_dev=%d\n", i, (int)is_dev);
+        } else {
+            (void)fprintf(stderr,
+                "[validation] filled send seg=%u payload=%u seed=0x%x via %s\n",
+                i, payload, PERFTEST_WRITE_LAT_VALID_SEED,
+                is_dev ? "H2D(fill_gpu)" : "host");
+        }
+
+        if (eye) {
+            if (is_dev) {
+                (void)perftest_gdr_eye_init_gpu_recv(recv_base, cfg->size);
+            } else {
+                /* 覆盖 seed 前缀, 专供肉眼; GPU 侧 finish 只看 magic. */
+                (void)perftest_gdr_eye_plant_host(send_base, cfg->size);
+            }
+        }
+    }
+}
+
+static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t *cfg)
+{
+    uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
+    uint32_t i;
+    uint32_t payload;
+    bool eye = ((size_t)cfg->size >= perftest_gdr_eye_min_size());
+
+    if (cfg->size < 2) {
+        return;
+    }
+    payload = cfg->size - 1u;
+
+    for (i = 0; i < seg_num; i++) {
+        perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
+        bool is_dev = perftest_gpu_needs_cpu_flag(gbuf);
+
+        if (!is_dev) {
+            continue;
+        }
+
+        if (eye) {
+            (void)fprintf(stderr,
+                "[gdr-verify] dumping GPU recv after write_lat (jetty/seg=%u)...\n", i);
+            (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
+            continue;
+        }
+
+        {
+            long bad = perftest_validation_check(ctx->local_buf[i], payload,
+                PERFTEST_WRITE_LAT_VALID_SEED, true);
+
+            if (bad == 0) {
+                (void)fprintf(stderr,
+                    "[validation] PASS: GPU recv seg=%u matches seed=0x%x "
+                    "(%u bytes, via D2H)\n",
+                    i, PERFTEST_WRITE_LAT_VALID_SEED, payload);
+            } else if (bad < 0) {
+                (void)fprintf(stderr,
+                    "[validation] FAIL: GPU recv seg=%u D2H/check error\n", i);
+            } else {
+                (void)fprintf(stderr,
+                    "[validation] FAIL: GPU recv seg=%u mismatched=%ld / %u "
+                    "(seed=0x%x, via D2H)\n",
+                    i, bad, payload, PERFTEST_WRITE_LAT_VALID_SEED);
+            }
+        }
+    }
+}
+
 static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
 {
     int ret;
@@ -1540,11 +1657,15 @@ static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
         return ret;
     }
 
+    write_lat_gdr_eye_prepare(ctx, cfg);
+
     if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
         ret = run_lat_test(ctx, cfg, run_write_lat_simplex);
     } else {
         ret = run_lat_test(ctx, cfg, run_write_lat_duplex);
     }
+
+    write_lat_gdr_eye_finish(ctx, cfg);
 
     destroy_jfs_wr(ctx);
 
