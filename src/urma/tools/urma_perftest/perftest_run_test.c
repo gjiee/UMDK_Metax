@@ -48,6 +48,40 @@
 #define PERFTEST_IMM_DATA (0x20230416)
 #define PERFTEST_FLAG_USER_CTX (63)
 
+/*
+ * write_lat 用最后 1 字节做 ping-pong 信号. 原生 / proxy 下 local_buf 是
+ * host 可达地址, 直接 *poll_buf / *post_buf 即可.
+ * peermem / GDR 下 local_buf 是 GPU VA: 用独立 host cpu_flag + 1B cuMemcpy,
+ * 不改动 URMA WR 仍指向 GPU VA 的数据路径.
+ */
+static int write_lat_wait_flag(perftest_gpu_buffer_t *gbuf, void *gpu_poll_va,
+    volatile char *poll_buf, char expected, volatile duration_states_t *state)
+{
+    if (perftest_gpu_needs_cpu_flag(gbuf)) {
+        char b;
+
+        do {
+            if (perftest_gpu_flag_load(gbuf, gpu_poll_va, &b) != 0) {
+                return -1;
+            }
+        } while (b != expected && *state != END_STATE);
+        return 0;
+    }
+    while (*poll_buf != expected && *state != END_STATE) {
+    }
+    return 0;
+}
+
+static int write_lat_store_flag(perftest_gpu_buffer_t *gbuf, void *gpu_post_va,
+    volatile char *post_buf, char val)
+{
+    if (perftest_gpu_needs_cpu_flag(gbuf)) {
+        return perftest_gpu_flag_store(gbuf, gpu_post_va, val);
+    }
+    *post_buf = val;
+    return 0;
+}
+
 run_test_ctx_t *g_duration_ctx;
 
 perftest_context_t *g_perftest_ctx;
@@ -290,6 +324,7 @@ static void *run_write_lat_simplex(void *arg)
     uint64_t rcnt = 0;
     run_test_ctx_t *run_ctx = &ctx->run_ctx;
     uint64_t rid = run_ctx->rid;
+    perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, id);
 
     urma_cr_t *cr = calloc(cfg->jfc_depth, sizeof(urma_cr_t));
     if (cr == NULL) {
@@ -299,8 +334,20 @@ static void *run_write_lat_simplex(void *arg)
 
     bool is_server = cfg->comm.server_ip == NULL;
 
-    volatile char *post_buf = (char *)ctx->local_buf[id] + ctx->buf_size + cfg->size - 1;
-    volatile char *poll_buf = (char *)ctx->local_buf[id] + cfg->size - 1;
+    void *gpu_post_va = (char *)ctx->local_buf[id] + ctx->buf_size + cfg->size - 1;
+    void *gpu_poll_va = (char *)ctx->local_buf[id] + cfg->size - 1;
+    volatile char *post_buf = (char *)gpu_post_va;
+    volatile char *poll_buf = (char *)gpu_poll_va;
+
+    /* peermem/GDR: 清零 GPU 两侧 flag 字节, 避免显存未初始化导致假完成. */
+    if (perftest_gpu_needs_cpu_flag(gbuf)) {
+        if (perftest_cuda_set_current_ctx() != 0 ||
+            write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
+            write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
+            (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
+            goto free_cr;
+        }
+    }
 
     if (cfg->time_type.bs.duration == 1) {
         update_duration_state(ctx, cfg);
@@ -310,7 +357,11 @@ static void *run_write_lat_simplex(void *arg)
         (cfg->time_type.bs.duration == 1 && run_ctx->state != END_STATE)) {
         if ((rcnt < cfg->iters || cfg->time_type.bs.duration == 1) && !(scnt < 1 && is_server)) {
             rcnt += cfg->jfs_post_list;
-            while (*poll_buf != (char)(rcnt / cfg->jfs_post_list) && run_ctx->state != END_STATE) {};
+            if (write_lat_wait_flag(gbuf, gpu_poll_va, poll_buf,
+                    (char)(rcnt / cfg->jfs_post_list), &run_ctx->state) != 0) {
+                (void)fprintf(stderr, "Failed GPU flag poll, id:%u, rcnt:%lu\n", id, rcnt);
+                goto free_cr;
+            }
         }
 
         if (scnt < cfg->iters || cfg->time_type.bs.duration == 1) {
@@ -319,7 +370,11 @@ static void *run_write_lat_simplex(void *arg)
             }
 
             scnt += cfg->jfs_post_list;
-            *post_buf = (char)(scnt / cfg->jfs_post_list);
+            if (write_lat_store_flag(gbuf, gpu_post_va, post_buf,
+                    (char)(scnt / cfg->jfs_post_list)) != 0) {
+                (void)fprintf(stderr, "Failed GPU flag store, id:%u, scnt:%lu\n", id, scnt);
+                goto free_cr;
+            }
 
             urma_status_t status;
             if (cfg->use_flat_api) {
@@ -1370,8 +1425,8 @@ static void *run_write_lat_duplex(void *arg)
     uint64_t rid = run_ctx->rid;
     //get GPU proxy memory, gbuf has the GPU memory, local buffer is shadow memory
     perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, id);
-    if(gbuf &&  gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY)
-    {
+    if (gbuf && (gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY ||
+                 perftest_gpu_needs_cpu_flag(gbuf))) {
         perftest_cuda_set_current_ctx();
     }
 
@@ -1383,8 +1438,18 @@ static void *run_write_lat_duplex(void *arg)
 
     bool is_server = cfg->comm.server_ip == NULL;
 
-    volatile char *post_buf = (char *)ctx->local_buf[id] + ctx->buf_size + cfg->size - 1;
-    volatile char *poll_buf = (char *)ctx->local_buf[id] + cfg->size - 1;
+    void *gpu_post_va = (char *)ctx->local_buf[id] + ctx->buf_size + cfg->size - 1;
+    void *gpu_poll_va = (char *)ctx->local_buf[id] + cfg->size - 1;
+    volatile char *post_buf = (char *)gpu_post_va;
+    volatile char *poll_buf = (char *)gpu_poll_va;
+
+    if (perftest_gpu_needs_cpu_flag(gbuf)) {
+        if (write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
+            write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
+            (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
+            goto free_cr;
+        }
+    }
 
     if (cfg->time_type.bs.duration == 1) {
         update_duration_state(ctx, cfg);
@@ -1395,7 +1460,11 @@ static void *run_write_lat_duplex(void *arg)
         
         if ((rcnt < cfg->iters || cfg->time_type.bs.duration == 1) && !(scnt < 1 && is_server)) {
             rcnt += cfg->jfs_post_list;
-            while (*poll_buf != (char)(rcnt / cfg->jfs_post_list) && run_ctx->state != END_STATE) {};
+            if (write_lat_wait_flag(gbuf, gpu_poll_va, poll_buf,
+                    (char)(rcnt / cfg->jfs_post_list), &run_ctx->state) != 0) {
+                (void)fprintf(stderr, "Failed GPU flag poll, id:%u, rcnt:%lu\n", id, rcnt);
+                goto free_cr;
+            }
             //For proxy
             if (run_ctx->state != END_STATE && gbuf &&  gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY) {
                 if (perftest_gpu_stage_from_nic_range(gbuf, 0, cfg->size) != 0) {
@@ -1418,7 +1487,11 @@ static void *run_write_lat_duplex(void *arg)
                     goto free_cr;
                 }
             }
-            *post_buf = (char)(scnt / cfg->jfs_post_list);
+            if (write_lat_store_flag(gbuf, gpu_post_va, post_buf,
+                    (char)(scnt / cfg->jfs_post_list)) != 0) {
+                (void)fprintf(stderr, "Failed GPU flag store, id:%u, scnt:%lu\n", id, scnt);
+                goto free_cr;
+            }
 
             urma_jfs_wr_t *wr = &run_ctx->jfs_wr[id * cfg->jfs_post_list];
             urma_jfs_wr_t *bad_wr = NULL;
