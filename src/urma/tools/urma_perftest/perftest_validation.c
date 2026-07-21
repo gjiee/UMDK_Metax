@@ -101,6 +101,15 @@ int perftest_validation_fill_gpu(void *dptr, size_t size, uint32_t seed)
         V_LOG("FAIL: cuda loader not initialised");
         return -1;
     }
+    if (dptr == NULL || size == 0) {
+        V_LOG("invalid arg dptr=%p size=%zu", dptr, size);
+        return -1;
+    }
+    /* peermem 热路径外: H2D 前必须 current CUcontext. */
+    if (perftest_cuda_set_current_ctx() != 0) {
+        V_LOG("FAIL: cuCtxSetCurrent");
+        return -1;
+    }
     tmp = (uint8_t *)malloc(size);
     if (tmp == NULL) {
         V_LOG("ENOMEM tmp=%zu", size);
@@ -113,7 +122,7 @@ int perftest_validation_fill_gpu(void *dptr, size_t size, uint32_t seed)
         V_LOG("FAIL: cuMemcpyHtoD rc=%d", rc);
         return -1;
     }
-    V_LOG("ok: dptr=%p size=%zu seed=0x%x", dptr, size, seed);
+    V_LOG("ok: H2D dptr=%p size=%zu seed=0x%x", dptr, size, seed);
     return 0;
 }
 
@@ -125,6 +134,14 @@ long perftest_validation_check_gpu(void *dptr, size_t size, uint32_t seed)
 
     if (!perftest_cuda_is_loaded()) {
         V_LOG("FAIL: cuda loader not initialised");
+        return -1;
+    }
+    if (dptr == NULL || size == 0) {
+        V_LOG("invalid arg dptr=%p size=%zu", dptr, size);
+        return -1;
+    }
+    if (perftest_cuda_set_current_ctx() != 0) {
+        V_LOG("FAIL: cuCtxSetCurrent");
         return -1;
     }
     tmp = (uint8_t *)malloc(size);
@@ -140,7 +157,32 @@ long perftest_validation_check_gpu(void *dptr, size_t size, uint32_t seed)
     }
     bad = perftest_validation_check_host(tmp, size, seed);
     free(tmp);
+    V_LOG("ok: D2H dptr=%p size=%zu seed=0x%x mismatched=%zu",
+          dptr, size, seed, bad);
     return (long)bad;
+}
+
+int perftest_validation_fill(void *addr, size_t size, uint32_t seed, bool is_device_va)
+{
+    if (addr == NULL || size == 0) {
+        return -1;
+    }
+    if (is_device_va) {
+        return perftest_validation_fill_gpu(addr, size, seed);
+    }
+    perftest_validation_fill_host(addr, size, seed);
+    return 0;
+}
+
+long perftest_validation_check(void *addr, size_t size, uint32_t seed, bool is_device_va)
+{
+    if (addr == NULL || size == 0) {
+        return -1;
+    }
+    if (is_device_va) {
+        return perftest_validation_check_gpu(addr, size, seed);
+    }
+    return (long)perftest_validation_check_host(addr, size, seed);
 }
 
 /* ---- Asymmetric GPU eye-verify (host plant / GPU D2H dump) ------------- */

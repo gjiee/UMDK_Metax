@@ -39,6 +39,7 @@
 #ifndef PERFTEST_VALIDATION_H
 #define PERFTEST_VALIDATION_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -57,6 +58,19 @@ size_t perftest_validation_check_host(const void *buf,     size_t size, uint32_t
  */
 int    perftest_validation_fill_gpu (void *dptr,           size_t size, uint32_t seed);
 long   perftest_validation_check_gpu(void *dptr,           size_t size, uint32_t seed);
+
+/*
+ * 按地址类型自动分流 (write_lat / peermem 用):
+ *   is_device_va == false -> fill_host / check_host (纯 CPU)
+ *   is_device_va == true  -> fill_gpu  (host 生成 pattern + H2D)
+ *                           check_gpu (D2H + host 比对)
+ * peermem/GDR 的 local_buf 是 GPU VA, 必须走 true, 否则 CPU 解引用会 SIGSEGV.
+ */
+int  perftest_validation_fill (void *addr, size_t size, uint32_t seed, bool is_device_va);
+long perftest_validation_check(void *addr, size_t size, uint32_t seed, bool is_device_va);
+
+/* write_lat 非对称校验默认 seed (payload 不含最后 1 字节 flag). */
+#define PERFTEST_WRITE_LAT_VALID_SEED  (0x5542444du) /* 'UBDM' */
 
 /*
  * 非对称 GPU 写验证 (肉眼):
