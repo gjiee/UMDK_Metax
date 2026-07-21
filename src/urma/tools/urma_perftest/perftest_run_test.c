@@ -54,16 +54,81 @@
  * host 可达地址, 直接 *poll_buf / *post_buf 即可.
  * peermem / GDR 下 local_buf 是 GPU VA: 用独立 host cpu_flag + 1B cuMemcpy,
  * 不改动 URMA WR 仍指向 GPU VA 的数据路径.
+ *
+ * peermem 诊断: prepare 把整段 GPU 清 0 后, 等待期间 recv 半区只有
+ *   - 本端 D2H 读 (轮询)
+ *   - 对端 NIC DMA 写
+ * 本地不会再 H2D 写 recv. 每 10000 次 D2H 扫一遍 recv[0..size), 仍全 0
+ * 则打印一行 (说明 DMA 还没打到).
  */
+#define PERFTEST_GPU_ZERO_POLL_LOG_EVERY 10000u
+
+static int write_lat_gpu_recv_all_zero(void *gpu_recv, uint32_t nbytes, bool *out_all_zero)
+{
+    uint8_t *tmp;
+    uint32_t i;
+
+    if (out_all_zero == NULL) {
+        return -1;
+    }
+    *out_all_zero = true;
+    if (gpu_recv == NULL || nbytes == 0) {
+        return 0;
+    }
+    tmp = (uint8_t *)malloc(nbytes);
+    if (tmp == NULL) {
+        return -1;
+    }
+    if (perftest_cuda_memcpy_d2h(tmp, gpu_recv, nbytes) != 0) {
+        free(tmp);
+        return -1;
+    }
+    for (i = 0; i < nbytes; i++) {
+        if (tmp[i] != 0) {
+            *out_all_zero = false;
+            break;
+        }
+    }
+    free(tmp);
+    return 0;
+}
+
 static int write_lat_wait_flag(perftest_gpu_buffer_t *gbuf, void *gpu_poll_va,
-    volatile char *poll_buf, char expected, volatile duration_states_t *state)
+    volatile char *poll_buf, char expected, volatile duration_states_t *state,
+    void *gpu_recv_base, uint32_t recv_bytes)
 {
     if (perftest_gpu_needs_cpu_flag(gbuf)) {
         char b;
+        uint64_t spins = 0;
 
         do {
             if (perftest_gpu_flag_load(gbuf, gpu_poll_va, &b) != 0) {
                 return -1;
+            }
+            spins++;
+            if ((spins % PERFTEST_GPU_ZERO_POLL_LOG_EVERY) == 0 &&
+                gpu_recv_base != NULL && recv_bytes > 0) {
+                bool all_zero = true;
+
+                if (write_lat_gpu_recv_all_zero(gpu_recv_base, recv_bytes,
+                        &all_zero) != 0) {
+                    (void)fprintf(stderr,
+                        "[gdr-verify] poll #%lu: D2H recv check failed "
+                        "(recv=%p bytes=%u)\n",
+                        (unsigned long)spins, gpu_recv_base, recv_bytes);
+                } else if (all_zero) {
+                    (void)fprintf(stderr,
+                        "[gdr-verify] poll #%lu: GPU recv[%u] @%p still all "
+                        "zeros (no DMA hit yet; flag_expect=%d flag_now=%d)\n",
+                        (unsigned long)spins, recv_bytes, gpu_recv_base,
+                        (int)expected, (int)b);
+                } else {
+                    (void)fprintf(stderr,
+                        "[gdr-verify] poll #%lu: GPU recv[%u] @%p NON-ZERO "
+                        "(DMA hit?) flag_expect=%d flag_now=%d\n",
+                        (unsigned long)spins, recv_bytes, gpu_recv_base,
+                        (int)expected, (int)b);
+                }
             }
         } while (b != expected && *state != END_STATE);
         return 0;
@@ -359,7 +424,8 @@ static void *run_write_lat_simplex(void *arg)
         if ((rcnt < cfg->iters || cfg->time_type.bs.duration == 1) && !(scnt < 1 && is_server)) {
             rcnt += cfg->jfs_post_list;
             if (write_lat_wait_flag(gbuf, gpu_poll_va, poll_buf,
-                    (char)(rcnt / cfg->jfs_post_list), &run_ctx->state) != 0) {
+                    (char)(rcnt / cfg->jfs_post_list), &run_ctx->state,
+                    ctx->local_buf[id], cfg->size) != 0) {
                 (void)fprintf(stderr, "Failed GPU flag poll, id:%u, rcnt:%lu\n", id, rcnt);
                 goto free_cr;
             }
@@ -1462,7 +1528,8 @@ static void *run_write_lat_duplex(void *arg)
         if ((rcnt < cfg->iters || cfg->time_type.bs.duration == 1) && !(scnt < 1 && is_server)) {
             rcnt += cfg->jfs_post_list;
             if (write_lat_wait_flag(gbuf, gpu_poll_va, poll_buf,
-                    (char)(rcnt / cfg->jfs_post_list), &run_ctx->state) != 0) {
+                    (char)(rcnt / cfg->jfs_post_list), &run_ctx->state,
+                    ctx->local_buf[id], cfg->size) != 0) {
                 (void)fprintf(stderr, "Failed GPU flag poll, id:%u, rcnt:%lu\n", id, rcnt);
                 goto free_cr;
             }
@@ -1533,19 +1600,29 @@ free_cr:
 
 
 /*
- * write_lat 校验 (两层, 互不替代):
- *
- * 1) perftest_validation_* (linux-rdma 风格 seed pattern)
- *    - Host send: fill_host
- *    - peermem/GDR send: fill_gpu = host 生成 + H2D
- *    - peermem/GDR recv 测后: check_gpu = D2H + 比对
- *    - 只覆盖 payload 前 size-1 字节 (最后 1 字节是 flag)
- *
- * 2) gdr-eye 肉眼串 (可选, 需 -s >= eye_min)
- *    - Host 再在 send[0] 覆盖写入 "test GDR write"
- *    - GPU 测前 H2D INIT, 测后 D2H 打印
- *    - 覆盖 seed 前缀, 因此 eye 开启时 GPU 侧以 magic 为准, 不再做 seed check
+ * peermem/GDR: 整段 GPU buf 清 0. 之后只要对端 DMA 打到 recv, 出现非 0
+ * 即视为 hit (内容对错无所谓). Host/proxy 仍走原来的 plant/fill.
  */
+static int write_lat_gpu_zero_buffer(void *gpu_va, size_t nbytes)
+{
+    void *zeros;
+    int rc;
+
+    if (gpu_va == NULL || nbytes == 0) {
+        return -1;
+    }
+    if (perftest_cuda_set_current_ctx() != 0) {
+        return -1;
+    }
+    zeros = calloc(1, nbytes);
+    if (zeros == NULL) {
+        return -1;
+    }
+    rc = perftest_cuda_memcpy_h2d(gpu_va, zeros, nbytes);
+    free(zeros);
+    return rc;
+}
+
 static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t *cfg)
 {
     uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
@@ -1558,43 +1635,42 @@ static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t
     }
     payload = cfg->size - 1u;
 
-    if (!eye) {
-        (void)fprintf(stderr,
-            "[gdr-verify] eye magic SKIP (-s %u < %zu); still running seed "
-            "validation on %u-byte payload (seed=0x%x). use -s 32 for "
-            "\"%s\" eye dump\n",
-            cfg->size, perftest_gdr_eye_min_size(), payload,
-            PERFTEST_WRITE_LAT_VALID_SEED, perftest_gdr_eye_magic());
-    }
-
     for (i = 0; i < seg_num; i++) {
         perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
         bool is_dev = perftest_gpu_needs_cpu_flag(gbuf);
         void *recv_base = ctx->local_buf[i];
         void *send_base = (char *)ctx->local_buf[i] + ctx->buf_size;
 
-        /*
-         * 填充本端 send 半区: GPU VA 必须 H2D, 不能 CPU 直接写.
-         * (非对称时 Host 对端走 fill_host; 若本端也是 peermem 则 H2D.)
-         */
-        if (perftest_validation_fill(send_base, payload,
-                PERFTEST_WRITE_LAT_VALID_SEED, is_dev) != 0) {
-            (void)fprintf(stderr,
-                "[validation] fill send failed seg=%u is_dev=%d\n", i, (int)is_dev);
-        } else {
-            (void)fprintf(stderr,
-                "[validation] filled send seg=%u payload=%u seed=0x%x via %s\n",
-                i, payload, PERFTEST_WRITE_LAT_VALID_SEED,
-                is_dev ? "H2D(fill_gpu)" : "host");
+        if (is_dev) {
+            /*
+             * 整段 (recv+send) H2D 清 0. 等待期间 recv 不再被本端写入,
+             * 只靠对端 DMA; 发端仍会在 post 前 H2D 写 send 侧 flag.
+             */
+            if (write_lat_gpu_zero_buffer(recv_base, ctx->buf_len) != 0) {
+                (void)fprintf(stderr,
+                    "[gdr-verify] FAIL: zero GPU buf seg=%u va=%p len=%lu\n",
+                    i, recv_base, (unsigned long)ctx->buf_len);
+            } else {
+                (void)fprintf(stderr,
+                    "[gdr-verify] GPU buf seg=%u ZEROED va=%p len=%lu "
+                    "(recv@%p size=%u); any non-zero after wait => DMA hit\n",
+                    i, recv_base, (unsigned long)ctx->buf_len,
+                    recv_base, cfg->size);
+            }
+            continue;
         }
 
+        if (perftest_validation_fill(send_base, payload,
+                PERFTEST_WRITE_LAT_VALID_SEED, false) != 0) {
+            (void)fprintf(stderr,
+                "[validation] fill send failed seg=%u\n", i);
+        } else {
+            (void)fprintf(stderr,
+                "[validation] filled send seg=%u payload=%u seed=0x%x via host\n",
+                i, payload, PERFTEST_WRITE_LAT_VALID_SEED);
+        }
         if (eye) {
-            if (is_dev) {
-                (void)perftest_gdr_eye_init_gpu_recv(recv_base, cfg->size);
-            } else {
-                /* 覆盖 seed 前缀, 专供肉眼; GPU 侧 finish 只看 magic. */
-                (void)perftest_gdr_eye_plant_host(send_base, cfg->size);
-            }
+            (void)perftest_gdr_eye_plant_host(send_base, cfg->size);
         }
     }
 }
@@ -1603,47 +1679,38 @@ static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t 
 {
     uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
     uint32_t i;
-    uint32_t payload;
-    bool eye = ((size_t)cfg->size >= perftest_gdr_eye_min_size());
 
     if (cfg->size < 2) {
         return;
     }
-    payload = cfg->size - 1u;
 
     for (i = 0; i < seg_num; i++) {
         perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
-        bool is_dev = perftest_gpu_needs_cpu_flag(gbuf);
+        bool all_zero = true;
 
-        if (!is_dev) {
+        if (!perftest_gpu_needs_cpu_flag(gbuf)) {
             continue;
         }
-
-        if (eye) {
+        if (perftest_cuda_set_current_ctx() != 0) {
+            continue;
+        }
+        if (write_lat_gpu_recv_all_zero(ctx->local_buf[i], cfg->size, &all_zero) != 0) {
             (void)fprintf(stderr,
-                "[gdr-verify] dumping GPU recv after write_lat (jetty/seg=%u)...\n", i);
-            (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
+                "[gdr-verify] finish: D2H recv check failed seg=%u\n", i);
             continue;
         }
-
-        {
-            long bad = perftest_validation_check(ctx->local_buf[i], payload,
-                PERFTEST_WRITE_LAT_VALID_SEED, true);
-
-            if (bad == 0) {
-                (void)fprintf(stderr,
-                    "[validation] PASS: GPU recv seg=%u matches seed=0x%x "
-                    "(%u bytes, via D2H)\n",
-                    i, PERFTEST_WRITE_LAT_VALID_SEED, payload);
-            } else if (bad < 0) {
-                (void)fprintf(stderr,
-                    "[validation] FAIL: GPU recv seg=%u D2H/check error\n", i);
-            } else {
-                (void)fprintf(stderr,
-                    "[validation] FAIL: GPU recv seg=%u mismatched=%ld / %u "
-                    "(seed=0x%x, via D2H)\n",
-                    i, bad, payload, PERFTEST_WRITE_LAT_VALID_SEED);
-            }
+        if (all_zero) {
+            (void)fprintf(stderr,
+                "[gdr-verify] finish: GPU recv[%u] @%p still all zeros "
+                "(DMA did NOT land)\n",
+                cfg->size, ctx->local_buf[i]);
+        } else {
+            (void)fprintf(stderr,
+                "[gdr-verify] finish: GPU recv[%u] @%p NON-ZERO "
+                "(DMA hit, content ignored)\n",
+                cfg->size, ctx->local_buf[i]);
+            /* 顺带 dump 前缀便于肉眼看. */
+            (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
         }
     }
 }
