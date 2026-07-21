@@ -16,6 +16,7 @@
 #include "perftest_communication.h"
 #include "perftest_resources.h"
 #include "perftest_run_test.h"
+#include "perftest_gpu_alloc.h"
 
 typedef struct context_cfg {
     perftest_context_t *ctx;
@@ -119,26 +120,19 @@ static void *write_dirty_thread(void *args)
     perftest_config_t *cfg = ctx_cfg->cfg;
 
     /*
-     * GDR 影响点 (TODO):
-     *
-     *   write_dirty_thread 的目的是模拟"NIC 在搬数据时, host 也在并发改 buf"
-     *   这种场景, 用来观测一致性 / cache 行为. 现在的 str[i] = rand_num 是
-     *   CPU 直接写 buffer, 在 host 模式下天然成立; 但在 GDR-direct 模式下,
-     *   ctx->local_buf[*] 是 GPU 设备指针, 这条 store 会 SIGSEGV.
-     *
-     *   真实现:
-     *     if (ctx->mem_ops) {
-     *         uint8_t pattern = (uint8_t)(rand() % 256);
-     *         // 用 GPU memset / cuMemsetD8Async 来产生"脏数据"
-     *         ctx->mem_ops->copy_h2b(ctx->mem_ops, dst_addr, &pattern, len);
-     *     }
-     *
-     *   GDR-host-proxy 模式下, ctx->local_buf 已经被换成 host shadow,
-     *   原来的 str[i] = ... 又恢复可用; 但为了统一仍走 mem_ops.
-     *
-     *   当前阶段保持原逻辑不变, 因为 GDR 模式还没真启用 (urma_register_seg_dmabuf
-     *   会返回 ENOTSUP 触发 fallback, fallback 后 buf 就是 host).
+     * peermem / GDR: local_buf 是真实 GPU VA, CPU 直接写会 SIGSEGV.
+     * 原生 host 与 host-proxy (shadow) 保持原逻辑不变.
      */
+    {
+        perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, 0);
+
+        if (perftest_gpu_needs_cpu_flag(gbuf)) {
+            (void)fprintf(stderr,
+                "write_dirty_thread: skip CPU dirty writes for %s (GPU VA)\n",
+                perftest_gpu_alloc_strategy_name(gbuf->strategy));
+            return NULL;
+        }
+    }
     while (cfg->enable_write_dirty == true && cfg->write_dirty_period >= PERFTEST_DEF_INF_PERIOD_MS) {
         int rand_num = rand() % PERFTEST_CHAR_MAX_VALUE;
         if (cfg->seg_pre_jetty == false) {

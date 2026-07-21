@@ -32,6 +32,7 @@
 #ifndef PERFTEST_GPU_ALLOC_H
 #define PERFTEST_GPU_ALLOC_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -86,6 +87,13 @@ typedef struct perftest_gpu_buffer {
     int                            dmabuf_fd;       /* >=0 only for GDR */
     uint64_t                       dmabuf_offset;
     void                          *gpu_ptr;         /* HOST_PROXY: GPU buf */
+    /*
+     * PEERMEM / GDR: local_buf 是真实 GPU VA, CPU 不能直接解引用做
+     * write_lat 的 flag 字节轮询/写入 (会 SIGSEGV). 这里单独申请一小段
+     * host 暂存, 通过 1 字节 cuMemcpyDtoH/HtoD 与 GPU flag 同步.
+     * HOST_PROXY / MEMALIGN / 原生 host 路径不分配, 保持原生态.
+     */
+    void                          *cpu_flag;        /* host scratch, or NULL */
     perftest_gpu_alloc_strategy_t  strategy;
 } perftest_gpu_buffer_t;
 
@@ -126,9 +134,20 @@ int  perftest_gpu_stage_from_nic(struct perftest_gpu_buffer *buf, size_t len);
 int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
                                       size_t off, size_t len);
 int perftest_gpu_stage_to_nic_range(perftest_gpu_buffer_t *buf,
-                                    size_t off, size_t len);          
+                                    size_t off, size_t len);
 
-                           
+/*
+ * write_lat flag 辅助 (仅 PEERMEM / GDR):
+ *   needs_cpu_flag: 是否必须走 host 暂存 + cuMemcpy, 不能直接 *poll_buf;
+ *   flag_load/store: 用 buf->cpu_flag 做 1 字节 DtoH / HtoD.
+ * 其它 strategy 返回 false; load/store 不应被调用.
+ */
+bool perftest_gpu_needs_cpu_flag(const perftest_gpu_buffer_t *buf);
+int  perftest_gpu_flag_load(perftest_gpu_buffer_t *buf, void *gpu_flag_va,
+                            char *out);
+int  perftest_gpu_flag_store(perftest_gpu_buffer_t *buf, void *gpu_flag_va,
+                             char val);
+
 /* 给 print / 报告用的策略名. */
 const char *perftest_gpu_alloc_strategy_name(perftest_gpu_alloc_strategy_t s);
 

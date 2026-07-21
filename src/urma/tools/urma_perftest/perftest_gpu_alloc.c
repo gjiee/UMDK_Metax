@@ -54,8 +54,32 @@
 #define GA_LOG(fmt, ...) \
     fprintf(stderr, "[gpu-alloc] %s: " fmt "\n", __func__, ##__VA_ARGS__)
 
+/* write_lat flag 用的 host 暂存大小 (1 byte 足够; 对齐到 cacheline 避免伪共享). */
+#define PERFTEST_GPU_CPU_FLAG_BYTES ((size_t)64)
+
 /* 强制失败位掩码, 仅供测试. 默认 0. */
 static unsigned g_force_fail_mask = 0;
+
+/*
+ * PEERMEM / GDR 成功路径上额外申请一小段 host 内存, 供 write_lat 的
+ * post_buf/poll_buf 协议走 CPU 可达地址 + 1B cuMemcpy, 不改动 URMA 注册的
+ * GPU VA (local_buf / addr 仍是设备指针).
+ */
+static int alloc_cpu_flag_scratch(perftest_gpu_buffer_t *out)
+{
+    void *p = NULL;
+
+    if (posix_memalign(&p, PERFTEST_GPU_CPU_FLAG_BYTES, PERFTEST_GPU_CPU_FLAG_BYTES) != 0 ||
+        p == NULL) {
+        GA_LOG("FAIL: posix_memalign cpu_flag");
+        return -1;
+    }
+    memset(p, 0, PERFTEST_GPU_CPU_FLAG_BYTES);
+    out->cpu_flag = p;
+    GA_LOG("cpu_flag host scratch=%p (%zu bytes) for write_lat sentinel",
+           p, PERFTEST_GPU_CPU_FLAG_BYTES);
+    return 0;
+}
 
 /* --gpu-mode 选择的入口策略. 默认 NONE = 直接 memalign. */
 static perftest_gpu_mode_t g_gpu_mode = PERFTEST_GPU_MODE_NONE;
@@ -172,7 +196,14 @@ static int try_alloc_gdr(size_t size, size_t alignment,
     out->size          = size;
     out->dmabuf_fd     = fd;
     out->dmabuf_offset = off;
+    out->cpu_flag      = NULL;
     out->strategy      = PERFTEST_GPU_ALLOC_GDR;
+    if (alloc_cpu_flag_scratch(out) != 0) {
+        close(fd);
+        perftest_cuda_mem_free(dptr);
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
 
     GA_LOG("OK: dptr=%p fd=%d offset=%lu size=%zu  (caller still needs "
            "urma_register_seg_dmabuf to succeed; otherwise fallback peermem/proxy)",
@@ -289,7 +320,13 @@ static int try_alloc_peermem(size_t size, size_t alignment,
     out->size          = alloc_size;
     out->dmabuf_fd     = -1;
     out->dmabuf_offset = 0;
+    out->cpu_flag      = NULL;
     out->strategy      = PERFTEST_GPU_ALLOC_PEERMEM;
+    if (alloc_cpu_flag_scratch(out) != 0) {
+        (void)perftest_cuda_mem_free(dptr);
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
 
     GA_LOG("OK: dptr=%p requested_size=%zu alloc_size=%zu (64KB-aligned so "
            "kernel's nvidia_p2p_get_pages() 64KB-rounding stays within this "
@@ -558,13 +595,50 @@ int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
                                     (char *)buf->addr + off,
                                     len);
 }
+
+bool perftest_gpu_needs_cpu_flag(const perftest_gpu_buffer_t *buf)
+{
+    if (buf == NULL || buf->cpu_flag == NULL) {
+        return false;
+    }
+    return buf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
+           buf->strategy == PERFTEST_GPU_ALLOC_GDR;
+}
+
+int perftest_gpu_flag_load(perftest_gpu_buffer_t *buf, void *gpu_flag_va, char *out)
+{
+    if (!perftest_gpu_needs_cpu_flag(buf) || gpu_flag_va == NULL || out == NULL) {
+        return -1;
+    }
+    /* caller 需已 cuCtxSetCurrent; 热路径避免每次 set_current. */
+    if (perftest_cuda_memcpy_d2h(buf->cpu_flag, gpu_flag_va, 1) != 0) {
+        return -1;
+    }
+    *out = *(volatile char *)buf->cpu_flag;
+    return 0;
+}
+
+int perftest_gpu_flag_store(perftest_gpu_buffer_t *buf, void *gpu_flag_va, char val)
+{
+    if (!perftest_gpu_needs_cpu_flag(buf) || gpu_flag_va == NULL) {
+        return -1;
+    }
+    *(volatile char *)buf->cpu_flag = val;
+    return perftest_cuda_memcpy_h2d(gpu_flag_va, buf->cpu_flag, 1);
+}
+
 void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
 {
     if (buf == NULL) return;
 
-    GA_LOG("releasing strategy=%s addr=%p gpu_ptr=%p size=%zu fd=%d",
+    GA_LOG("releasing strategy=%s addr=%p gpu_ptr=%p cpu_flag=%p size=%zu fd=%d",
            perftest_gpu_alloc_strategy_name(buf->strategy),
-           buf->addr, buf->gpu_ptr, buf->size, buf->dmabuf_fd);
+           buf->addr, buf->gpu_ptr, buf->cpu_flag, buf->size, buf->dmabuf_fd);
+
+    if (buf->cpu_flag != NULL) {
+        free(buf->cpu_flag);
+        buf->cpu_flag = NULL;
+    }
 
     switch (buf->strategy) {
         case PERFTEST_GPU_ALLOC_GDR:
