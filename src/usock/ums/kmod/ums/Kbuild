@@ -15,4 +15,3 @@ ccflags-y += -I/home/tong/UMDK_netlab/src/usock/ums/kmod/ums/cm
 ccflags-y += -I/home/tong/UMDK_netlab/src/usock/ums/kmod/ums/io
 ccflags-y += -I/home/tong/UMDK_netlab/src/usock/ums/kmod/ums/dim
 ccflags-y += -I/home/tong/UMDK_netlab/src/usock/ums/kmod/ums/dfx
-ccflags-y += -DCONFIG_SMC

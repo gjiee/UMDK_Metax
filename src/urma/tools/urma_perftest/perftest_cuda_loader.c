@@ -193,6 +193,24 @@ int perftest_cuda_set_current_ctx(void)
  * 部分 CUDA Driver API 名字带 _v2 后缀 (ABI stable handle). 这里两个候选名
  * 都尝试, 与 linux-rdma 的做法一致.
  */
+
+
+static void *dlsym_prefer_v2(void *lib,
+                             const char *legacy,
+                             const char *v2)
+{
+    void *p = NULL;
+
+    if (v2 != NULL)
+        p = dlsym(lib, v2);
+
+    if (p == NULL)
+        p = dlsym(lib, legacy);
+
+    return p;
+}
+
+
 static void *dlsym2(void *lib, const char *primary, const char *fallback)
 {
     void *p = dlsym(lib, primary);
@@ -212,18 +230,18 @@ int perftest_cuda_loader_init(void)
         CL_LOG("dlopen(libcuda.so.1) failed: %s", dlerror());
         return -1;
     }
-
-#define LOAD(name, fallback)                                                  \
-    do {                                                                      \
-        g_##name = (pfn_##name)dlsym2(g_libcuda, #name, fallback);            \
-        if (g_##name == NULL) {                                               \
-            CL_LOG("dlsym(%s%s%s) failed: %s",                                \
-                   #name,                                                     \
-                   fallback ? "/" : "",                                       \
-                   fallback ? fallback : "",                                  \
-                   dlerror());                                                \
-            goto err;                                                         \
-        }                                                                     \
+    #define LOAD(name, preferred)                                                \
+    do {                                                                     \
+        const char *selected = preferred ? preferred : #name;                \
+        g_##name = (pfn_##name)dlsym_prefer_v2(                              \
+            g_libcuda, #name, preferred);                                    \
+        if (g_##name == NULL) {                                              \
+            CL_LOG("dlsym(%s/%s) failed: %s",                                \
+                   #name, preferred ? preferred : "-", dlerror());            \
+            goto err;                                                        \
+        }                                                                    \
+        CL_LOG("loaded %s for %s at %p",                                     \
+               selected, #name, (void *)g_##name);                           \
     } while (0)
 
     LOAD(cuInit,                            NULL);
