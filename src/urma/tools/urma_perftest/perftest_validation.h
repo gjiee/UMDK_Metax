@@ -58,6 +58,26 @@ size_t perftest_validation_check_host(const void *buf,     size_t size, uint32_t
 int    perftest_validation_fill_gpu (void *dptr,           size_t size, uint32_t seed);
 long   perftest_validation_check_gpu(void *dptr,           size_t size, uint32_t seed);
 
+/*
+ * 非对称 GPU 写验证 (肉眼):
+ *   场景: 只有被写方是 peermem/GDR (GPU VA); 对端是普通 Host memory.
+ *   - 对端在 send 缓冲区固定偏移 0 写入可识别字符串 (默认 "test GDR write");
+ *   - 被写方测试结束后把 recv[0..] D2H 打到 stderr, 肉眼看是否写上.
+ *   最后 1 字节仍留给 write_lat flag, 因此 payload size 需 >= magic_len+1.
+ */
+#define PERFTEST_GDR_EYE_MAGIC       "test GDR write"
+#define PERFTEST_GDR_EYE_INIT_MARK   "GPU_RECV_UNWRITTEN"
+
+const char *perftest_gdr_eye_magic(void);
+size_t      perftest_gdr_eye_min_size(void); /* strlen(magic)+1, 含 flag 字节 */
+
+/* Host 发送端: 在 send_base[0..] 植入 magic (不碰最后 1 字节 flag). */
+int  perftest_gdr_eye_plant_host(void *send_base, uint32_t size);
+
+/* GPU 被写方: 测试前 H2D 写入 INIT_MARK, 测完 D2H 打印 recv 内容. */
+int  perftest_gdr_eye_init_gpu_recv(void *recv_dptr, uint32_t size);
+int  perftest_gdr_eye_dump_gpu_recv(void *recv_dptr, uint32_t size);
+
 #ifdef __cplusplus
 }
 #endif

@@ -23,6 +23,7 @@
 #include "perftest_resources.h"
 #include "perftest_gpu_alloc.h"
 #include "perftest_cuda_loader.h"
+#include "perftest_validation.h"
 
 #define PERFTEST_HALF (2)
 #define PERFTEST_ITERS_99 (0.99)
@@ -1531,6 +1532,57 @@ free_cr:
 }
 
 
+/*
+ * 非对称验证: 对端 Host 在 send[0] 种 "test GDR write";
+ * 被写方 peermem/GDR 测前 H2D 打 INIT, 测后 D2H 肉眼看.
+ * 需要 -s >= perftest_gdr_eye_min_size() (默认 LAT size=2 不够).
+ */
+static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t *cfg)
+{
+    uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
+    uint32_t i;
+
+    if ((size_t)cfg->size < perftest_gdr_eye_min_size()) {
+        (void)fprintf(stderr,
+            "[gdr-verify] SKIP: -s %u < %zu; use e.g. -s 32 to eye-check "
+            "host->GPU write of \"%s\"\n",
+            cfg->size, perftest_gdr_eye_min_size(), perftest_gdr_eye_magic());
+        return;
+    }
+
+    for (i = 0; i < seg_num; i++) {
+        perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
+        void *recv_base = ctx->local_buf[i];
+        void *send_base = (char *)ctx->local_buf[i] + ctx->buf_size;
+
+        if (perftest_gpu_needs_cpu_flag(gbuf)) {
+            (void)perftest_gdr_eye_init_gpu_recv(recv_base, cfg->size);
+        } else {
+            (void)perftest_gdr_eye_plant_host(send_base, cfg->size);
+        }
+    }
+}
+
+static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t *cfg)
+{
+    uint32_t seg_num = (cfg->seg_pre_jetty == false) ? 1 : cfg->jettys;
+    uint32_t i;
+
+    if ((size_t)cfg->size < perftest_gdr_eye_min_size()) {
+        return;
+    }
+
+    for (i = 0; i < seg_num; i++) {
+        perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
+
+        if (perftest_gpu_needs_cpu_flag(gbuf)) {
+            (void)fprintf(stderr,
+                "[gdr-verify] dumping GPU recv after write_lat (jetty/seg=%u)...\n", i);
+            (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
+        }
+    }
+}
+
 static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
 {
     int ret;
@@ -1540,11 +1592,15 @@ static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
         return ret;
     }
 
+    write_lat_gdr_eye_prepare(ctx, cfg);
+
     if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
         ret = run_lat_test(ctx, cfg, run_write_lat_simplex);
     } else {
         ret = run_lat_test(ctx, cfg, run_write_lat_duplex);
     }
+
+    write_lat_gdr_eye_finish(ctx, cfg);
 
     destroy_jfs_wr(ctx);
 

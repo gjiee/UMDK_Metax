@@ -142,3 +142,144 @@ long perftest_validation_check_gpu(void *dptr, size_t size, uint32_t seed)
     free(tmp);
     return (long)bad;
 }
+
+/* ---- Asymmetric GPU eye-verify (host plant / GPU D2H dump) ------------- */
+
+const char *perftest_gdr_eye_magic(void)
+{
+    return PERFTEST_GDR_EYE_MAGIC;
+}
+
+size_t perftest_gdr_eye_min_size(void)
+{
+    /* payload 最后 1 字节是 write_lat flag, magic 占前面. */
+    return strlen(PERFTEST_GDR_EYE_MAGIC) + 1u;
+}
+
+int perftest_gdr_eye_plant_host(void *send_base, uint32_t size)
+{
+    size_t magic_len = strlen(PERFTEST_GDR_EYE_MAGIC);
+    size_t copy_len;
+
+    if (send_base == NULL) {
+        return -1;
+    }
+    if ((size_t)size < perftest_gdr_eye_min_size()) {
+        V_LOG("SKIP plant: size=%u < min=%zu (use -s >= %zu)",
+              size, perftest_gdr_eye_min_size(), perftest_gdr_eye_min_size());
+        return -1;
+    }
+    /* 不覆盖 size-1 的 flag 字节. */
+    copy_len = magic_len;
+    if (copy_len > (size_t)size - 1u) {
+        copy_len = (size_t)size - 1u;
+    }
+    memcpy(send_base, PERFTEST_GDR_EYE_MAGIC, copy_len);
+    if (copy_len < (size_t)size - 1u) {
+        memset((char *)send_base + copy_len, 0, (size_t)size - 1u - copy_len);
+    }
+    V_LOG("host planted magic=\"%s\" at send[0] (%zu bytes, size=%u, flag@%u untouched)",
+          PERFTEST_GDR_EYE_MAGIC, copy_len, size, size - 1u);
+    (void)fprintf(stderr,
+        "[gdr-verify] HOST planted \"%s\" at send[0] (payload size=%u)\n",
+        PERFTEST_GDR_EYE_MAGIC, size);
+    return 0;
+}
+
+int perftest_gdr_eye_init_gpu_recv(void *recv_dptr, uint32_t size)
+{
+    size_t mark_len = strlen(PERFTEST_GDR_EYE_INIT_MARK);
+    size_t copy_len;
+    char  *tmp;
+    int    rc;
+
+    if (recv_dptr == NULL || size == 0) {
+        return -1;
+    }
+    if (!perftest_cuda_is_loaded()) {
+        V_LOG("FAIL: cuda loader not initialised");
+        return -1;
+    }
+    if (perftest_cuda_set_current_ctx() != 0) {
+        return -1;
+    }
+    tmp = (char *)calloc(1, size);
+    if (tmp == NULL) {
+        return -1;
+    }
+    copy_len = mark_len;
+    if (copy_len > (size_t)size - (size > 1 ? 1u : 0u)) {
+        copy_len = size > 1 ? (size_t)size - 1u : (size_t)size;
+    }
+    if (copy_len > 0) {
+        memcpy(tmp, PERFTEST_GDR_EYE_INIT_MARK, copy_len);
+    }
+    rc = perftest_cuda_memcpy_h2d(recv_dptr, tmp, size);
+    free(tmp);
+    if (rc != 0) {
+        V_LOG("FAIL: H2D init mark rc=%d", rc);
+        return -1;
+    }
+    (void)fprintf(stderr,
+        "[gdr-verify] GPU recv prefilled with \"%s\" (expect overwrite by host WR)\n",
+        PERFTEST_GDR_EYE_INIT_MARK);
+    return 0;
+}
+
+int perftest_gdr_eye_dump_gpu_recv(void *recv_dptr, uint32_t size)
+{
+    size_t dump_len;
+    size_t i;
+    char  *tmp;
+    int    rc;
+
+    if (recv_dptr == NULL || size == 0) {
+        return -1;
+    }
+    if (!perftest_cuda_is_loaded()) {
+        V_LOG("FAIL: cuda loader not initialised");
+        return -1;
+    }
+    if (perftest_cuda_set_current_ctx() != 0) {
+        return -1;
+    }
+    /* 打印 payload 前缀, 不含最后 flag 字节; 至少打到 magic 长度. */
+    dump_len = (size_t)size > 1u ? (size_t)size - 1u : (size_t)size;
+    if (dump_len > 64u) {
+        dump_len = 64u;
+    }
+    tmp = (char *)calloc(1, dump_len + 1u);
+    if (tmp == NULL) {
+        return -1;
+    }
+    rc = perftest_cuda_memcpy_d2h(tmp, recv_dptr, dump_len);
+    if (rc != 0) {
+        free(tmp);
+        V_LOG("FAIL: D2H dump rc=%d", rc);
+        return -1;
+    }
+    tmp[dump_len] = '\0';
+    (void)fprintf(stderr,
+        "[gdr-verify] GPU D2H recv[0..%zu): ascii=\"%s\"\n", dump_len, tmp);
+    (void)fprintf(stderr, "[gdr-verify] GPU D2H recv hex:");
+    for (i = 0; i < dump_len; i++) {
+        (void)fprintf(stderr, " %02x", (unsigned char)tmp[i]);
+    }
+    (void)fprintf(stderr, "\n");
+    if (strncmp(tmp, PERFTEST_GDR_EYE_MAGIC, strlen(PERFTEST_GDR_EYE_MAGIC)) == 0) {
+        (void)fprintf(stderr,
+            "[gdr-verify] PASS: saw magic \"%s\" in GPU memory (host->GPU write OK)\n",
+            PERFTEST_GDR_EYE_MAGIC);
+    } else if (strncmp(tmp, PERFTEST_GDR_EYE_INIT_MARK,
+                       strlen(PERFTEST_GDR_EYE_INIT_MARK)) == 0) {
+        (void)fprintf(stderr,
+            "[gdr-verify] FAIL: still INIT mark — host write did not land on GPU\n");
+    } else {
+        (void)fprintf(stderr,
+            "[gdr-verify] CHECK: ascii != magic/init; inspect hex above "
+            "(need host -s >= %zu and host planted magic)\n",
+            perftest_gdr_eye_min_size());
+    }
+    free(tmp);
+    return 0;
+}
