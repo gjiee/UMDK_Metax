@@ -162,14 +162,14 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 
 	udma_u_init_seg_cfg(urma_ctx, seg_cfg, seg);
 
-	if (!seg->is_gpu_seg) {                       /* GPU no need GRANT FOR GDR TEST */
+	//if (!seg->is_gpu_seg) {                       
 		ret = udma_u_grant_segment(seg);
 		if (ret) {
 			UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",
 				     seg_cfg->flag.bs.access, ret);
 			goto err_ummu_grant;
 		}
-	}
+	//}
 
 	ret = udma_exec_register_seg_cmd(urma_ctx, seg_cfg, &seg->urma_tseg);
 	if (ret)
@@ -187,7 +187,7 @@ err_pin_segment:
 	 * 过的地址"的行为未知（可能报错，也可能卡住/未定义），是之前
 	 * 内核那边一强制返回错误、这边就疑似卡死的直接原因。
 	 */
-	if (!seg->is_gpu_seg)
+//	if (!seg->is_gpu_seg)
 		udma_u_ungrant_seg(seg);
 err_ummu_grant:
 	free(seg);

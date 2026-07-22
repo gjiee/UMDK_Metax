@@ -61,7 +61,7 @@
  * 本地不会再 H2D 写 recv. 每 10000 次 D2H 扫一遍 recv[0..size), 仍全 0
  * 则打印一行 (说明 DMA 还没打到).
  */
-#define PERFTEST_GPU_ZERO_POLL_LOG_EVERY 10000u
+#define PERFTEST_GPU_ZERO_POLL_LOG_EVERY 1000000u
 
 static int write_lat_gpu_recv_all_zero(void *gpu_recv, uint32_t nbytes, bool *out_all_zero)
 {
