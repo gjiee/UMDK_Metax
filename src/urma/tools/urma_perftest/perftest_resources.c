@@ -834,9 +834,9 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
 
     /*
      * GPU 变种内存分配旁路:
-     *   read_lat_gpu / write_lat_gpu 走 perftest_gpu_alloc_buffer, 内部
-     *   GDR -> peermem -> host-proxy -> memalign 自动回退. 其它 cmd 与原来
-     *   100% 一致, 保留 use_huge_page / memalign 双分支.
+     *   read_lat_gpu / write_lat_gpu / read_bw_gpu / write_bw_gpu 走
+     *   perftest_gpu_alloc_buffer, 内部 GDR -> peermem -> host-proxy -> memalign
+     *   自动回退. 其它 cmd 与原来 100% 一致, 保留 use_huge_page / memalign 双分支.
      */
     if (perftest_cmd_is_gpu(cfg->cmd)) {
         ctx->gpu_bufs_n = seg_num;

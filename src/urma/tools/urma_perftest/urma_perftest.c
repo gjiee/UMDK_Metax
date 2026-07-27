@@ -52,9 +52,11 @@ static int run_test(perftest_context_t *ctx, perftest_config_t *cfg)
             ret = run_atomic_lat(ctx, cfg);
             break;
         case PERFTEST_READ_BW:
+        case PERFTEST_READ_BW_GPU:    /* 与 READ_BW 完全相同的主循环, 内存来源不同 */
             ret = run_read_bw(ctx, cfg);
             break;
         case PERFTEST_WRITE_BW:
+        case PERFTEST_WRITE_BW_GPU:   /* 与 WRITE_BW 完全相同的主循环, 内存来源不同 */
             ret = run_write_bw(ctx, cfg);
             break;
         case PERFTEST_SEND_BW:

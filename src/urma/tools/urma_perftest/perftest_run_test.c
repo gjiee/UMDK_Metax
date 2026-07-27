@@ -819,9 +819,11 @@ static void init_jfs_wr_opcode(urma_jfs_wr_t *wr, const perftest_config_t *cfg)
             wr->opcode = (cfg->atomic_type == PERFTEST_CAS ? URMA_OPC_CAS : URMA_OPC_FADD);
             break;
         case PERFTEST_READ_BW:
+        case PERFTEST_READ_BW_GPU:
             wr->opcode = URMA_OPC_READ;
             break;
         case PERFTEST_WRITE_BW:
+        case PERFTEST_WRITE_BW_GPU:
             init_jfs_write_wr_opcode(wr, cfg);
             break;
         case PERFTEST_SEND_BW:
@@ -894,7 +896,8 @@ static void init_read_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, perf
         uint32_t r_idx = (i * cfg->jfs_post_list + j - 1) * PERFTEST_SGE_NUM_PRE_WR * cfg->sge_num;
         local_sge[0].addr = run_ctx->jfs_sge[l_idx].addr;
         remote_sge[0].addr = run_ctx->jfs_sge[r_idx].addr;
-        if (cfg->cmd == PERFTEST_READ_BW && cfg->size <= ctx->page_size / PERFTEST_BUF_NUM) {
+        if ((cfg->cmd == PERFTEST_READ_BW || cfg->cmd == PERFTEST_READ_BW_GPU) &&
+            cfg->size <= ctx->page_size / PERFTEST_BUF_NUM) {
             increase_loc_addr(&local_sge[0], cfg->size, j - 1, lva, cfg->cache_line_size, ctx->page_size);
             increase_loc_addr(&remote_sge[0], cfg->size, j - 1, rva, cfg->cache_line_size, ctx->page_size);
         }
@@ -947,7 +950,8 @@ static void init_write_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, per
         uint32_t r_idx = (i * cfg->jfs_post_list + j - 1) * PERFTEST_SGE_NUM_PRE_WR * cfg->sge_num;
         local_sge[0].addr = run_ctx->jfs_sge[l_idx].addr;
         remote_sge[0].addr = run_ctx->jfs_sge[r_idx].addr;
-        if (cfg->cmd == PERFTEST_WRITE_BW && cfg->size <= (ctx->page_size / PERFTEST_BUF_NUM)) {
+        if ((cfg->cmd == PERFTEST_WRITE_BW || cfg->cmd == PERFTEST_WRITE_BW_GPU) &&
+            cfg->size <= (ctx->page_size / PERFTEST_BUF_NUM)) {
             increase_loc_addr(&local_sge[0], cfg->size, j - 1, lva, cfg->cache_line_size, ctx->page_size);
             increase_loc_addr(&remote_sge[0], cfg->size, j - 1, rva, cfg->cache_line_size, ctx->page_size);
         }
@@ -1069,9 +1073,11 @@ static void init_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, perftest_
             init_atomic_jfs_wr(wr, ctx, cfg, i, j);
             return;
         case PERFTEST_READ_BW:
+        case PERFTEST_READ_BW_GPU:
             init_read_jfs_wr_sg(wr, ctx, cfg, i, j);
             return;
         case PERFTEST_WRITE_BW:
+        case PERFTEST_WRITE_BW_GPU:
             init_write_jfs_wr_sg(wr, ctx, cfg, i, j);
             return;
         case PERFTEST_SEND_BW:
