@@ -24,10 +24,12 @@ add_executable(urma_perftest
     # Each mode tries its own path and falls back to memalign on failure.
     # API:        perftest_gpu_alloc.h          (set_mode / alloc / free / stage_*)
     # CUDA glue:  perftest_cuda_loader.h        (dlopen libcuda.so.1)
+    # GDRCopy:    perftest_gdrcopy_loader.h     (dlopen libgdrapi.so for BAR poll)
     # Validation: perftest_validation.h         (linux-rdma-style fill / check)
     # See docs/urma_gpu_mode_cli.md for env setup tutorial.
     perftest_gpu_alloc.c
     perftest_cuda_loader.c
+    perftest_gdrcopy_loader.c
     perftest_validation.c
 )
 
@@ -46,10 +48,9 @@ target_include_directories(urma_perftest
 target_link_libraries(urma_perftest
     PRIVATE
         urma pthread m
-        # -ldl is required by perftest_cuda_loader.c (dlopen libcuda.so.1).
-        # libcuda itself is *not* linked here; the runtime dlopen lets the
-        # binary work on machines without CUDA installed (only --gpu-mode
-        # paths that need CUDA will then fall back to memalign).
+        # -ldl is required by perftest_cuda_loader.c / perftest_gdrcopy_loader.c
+        # (dlopen libcuda.so.1 / libgdrapi.so). Neither CUDA nor GDRCopy is
+        # linked at build time; missing runtime libs fall back gracefully.
         dl
 )
 

@@ -50,23 +50,50 @@
 #define PERFTEST_FLAG_USER_CTX (63)
 
 /*
- * write_lat 用最后 1 字节做 ping-pong 信号. 原生 / proxy 下 local_buf 是
- * host 可达地址, 直接 *poll_buf / *post_buf 即可.
- * peermem / GDR 下 local_buf 是 GPU VA: 用独立 host cpu_flag + 1B cuMemcpy,
- * 不改动 URMA WR 仍指向 GPU VA 的数据路径.
- *
- * peermem 诊断: prepare 把整段 GPU 清 0 后, 等待期间 recv 半区只有
- *   - 本端 D2H 读 (轮询)
- *   - 对端 NIC DMA 写
- * 本地不会再 H2D 写 recv. 每 10000 次 D2H 扫一遍 recv[0..size), 仍全 0
- * 则打印一行 (说明 DMA 还没打到).
+ * write_lat 用最后 1 字节做 ping-pong 信号.
+ *   host / proxy: 直接 *poll_buf / *post_buf
+ *   peermem/GDR + GDRCopy BAR: poll/post 指向 BAR CPU 映射 (无 D2H 热路径)
+ *   peermem/GDR 无 BAR: cpu_flag + 1B cuMemcpy 回退
+ * URMA WR 始终指向 GPU VA.
  */
 #define PERFTEST_GPU_ZERO_POLL_LOG_EVERY 1000000u
 
-static int write_lat_gpu_recv_all_zero(void *gpu_recv, uint32_t nbytes, bool *out_all_zero)
+static void write_lat_bind_flag_ptrs(perftest_gpu_buffer_t *gbuf,
+    void *gpu_poll_va, void *gpu_post_va,
+    volatile char **poll_buf, volatile char **post_buf)
+{
+    void *bar_poll;
+    void *bar_post;
+
+    if (poll_buf == NULL || post_buf == NULL) {
+        return;
+    }
+    *poll_buf = (volatile char *)gpu_poll_va;
+    *post_buf = (volatile char *)gpu_post_va;
+    if (!perftest_gpu_has_bar_map(gbuf)) {
+        return;
+    }
+    bar_poll = perftest_gpu_bar_from_gpu(gbuf, gpu_poll_va);
+    bar_post = perftest_gpu_bar_from_gpu(gbuf, gpu_post_va);
+    if (bar_poll == NULL || bar_post == NULL) {
+        (void)fprintf(stderr,
+            "[gdrcopy] WARN: bar_from_gpu failed; keeping GPU VA (unsafe)\n");
+        return;
+    }
+    *poll_buf = (volatile char *)bar_poll;
+    *post_buf = (volatile char *)bar_post;
+    (void)fprintf(stderr,
+        "[gdrcopy] write_lat flag poll/store via BAR cpu map "
+        "(poll=%p post=%p; no D2H hot path)\n",
+        bar_poll, bar_post);
+}
+
+static int write_lat_gpu_recv_all_zero(perftest_gpu_buffer_t *gbuf,
+    void *gpu_recv, uint32_t nbytes, bool *out_all_zero)
 {
     uint8_t *tmp;
     uint32_t i;
+    void *bar;
 
     if (out_all_zero == NULL) {
         return -1;
@@ -75,6 +102,19 @@ static int write_lat_gpu_recv_all_zero(void *gpu_recv, uint32_t nbytes, bool *ou
     if (gpu_recv == NULL || nbytes == 0) {
         return 0;
     }
+
+    /* Prefer BAR read for diagnostics when mapped. */
+    bar = perftest_gpu_bar_from_gpu(gbuf, gpu_recv);
+    if (bar != NULL) {
+        for (i = 0; i < nbytes; i++) {
+            if (((volatile uint8_t *)bar)[i] != 0) {
+                *out_all_zero = false;
+                break;
+            }
+        }
+        return 0;
+    }
+
     tmp = (uint8_t *)malloc(nbytes);
     if (tmp == NULL) {
         return -1;
@@ -110,10 +150,10 @@ static int write_lat_wait_flag(perftest_gpu_buffer_t *gbuf, void *gpu_poll_va,
                 gpu_recv_base != NULL && recv_bytes > 0) {
                 bool all_zero = true;
 
-                if (write_lat_gpu_recv_all_zero(gpu_recv_base, recv_bytes,
+                if (write_lat_gpu_recv_all_zero(gbuf, gpu_recv_base, recv_bytes,
                         &all_zero) != 0) {
                     (void)fprintf(stderr,
-                        "[gdr-verify] poll #%lu: D2H recv check failed "
+                        "[gdr-verify] poll #%lu: recv check failed "
                         "(recv=%p bytes=%u)\n",
                         (unsigned long)spins, gpu_recv_base, recv_bytes);
                 } else if (all_zero) {
@@ -405,10 +445,16 @@ static void *run_write_lat_simplex(void *arg)
     volatile char *post_buf = (char *)gpu_post_va;
     volatile char *poll_buf = (char *)gpu_poll_va;
 
-    /* peermem/GDR: 清零 GPU 两侧 flag 字节, 避免显存未初始化导致假完成. */
-    if (perftest_gpu_needs_cpu_flag(gbuf)) {
-        if (perftest_cuda_set_current_ctx() != 0 ||
-            write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
+    write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
+
+    /* peermem/GDR: 清零两侧 flag, 避免显存未初始化导致假完成. */
+    if (perftest_gpu_is_device_va(gbuf)) {
+        if (perftest_gpu_needs_cpu_flag(gbuf) &&
+            perftest_cuda_set_current_ctx() != 0) {
+            (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
+            goto free_cr;
+        }
+        if (write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
             write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
             (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
             goto free_cr;
@@ -1516,7 +1562,9 @@ static void *run_write_lat_duplex(void *arg)
     volatile char *post_buf = (char *)gpu_post_va;
     volatile char *poll_buf = (char *)gpu_poll_va;
 
-    if (perftest_gpu_needs_cpu_flag(gbuf)) {
+    write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
+
+    if (perftest_gpu_is_device_va(gbuf)) {
         if (write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
             write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
             (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
@@ -1608,14 +1656,22 @@ free_cr:
 /*
  * peermem/GDR: 整段 GPU buf 清 0. 之后只要对端 DMA 打到 recv, 出现非 0
  * 即视为 hit (内容对错无所谓). Host/proxy 仍走原来的 plant/fill.
+ * Prefer BAR memset when GDRCopy mapped (avoids H2D for prepare).
  */
-static int write_lat_gpu_zero_buffer(void *gpu_va, size_t nbytes)
+static int write_lat_gpu_zero_buffer(perftest_gpu_buffer_t *gbuf, void *gpu_va,
+    size_t nbytes)
 {
     void *zeros;
+    void *bar;
     int rc;
 
     if (gpu_va == NULL || nbytes == 0) {
         return -1;
+    }
+    bar = perftest_gpu_bar_from_gpu(gbuf, gpu_va);
+    if (bar != NULL) {
+        memset(bar, 0, nbytes);
+        return 0;
     }
     if (perftest_cuda_set_current_ctx() != 0) {
         return -1;
@@ -1643,25 +1699,26 @@ static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t
 
     for (i = 0; i < seg_num; i++) {
         perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
-        bool is_dev = perftest_gpu_needs_cpu_flag(gbuf);
+        bool is_dev = perftest_gpu_is_device_va(gbuf);
         void *recv_base = ctx->local_buf[i];
         void *send_base = (char *)ctx->local_buf[i] + ctx->buf_size;
 
         if (is_dev) {
             /*
-             * 整段 (recv+send) H2D 清 0. 等待期间 recv 不再被本端写入,
-             * 只靠对端 DMA; 发端仍会在 post 前 H2D 写 send 侧 flag.
+             * 整段 (recv+send) 清 0 (BAR 或 H2D). 等待期间 recv 不再被本端写入,
+             * 只靠对端 DMA; 发端仍会在 post 前写 send 侧 flag.
              */
-            if (write_lat_gpu_zero_buffer(recv_base, ctx->buf_len) != 0) {
+            if (write_lat_gpu_zero_buffer(gbuf, recv_base, ctx->buf_len) != 0) {
                 (void)fprintf(stderr,
                     "[gdr-verify] FAIL: zero GPU buf seg=%u va=%p len=%lu\n",
                     i, recv_base, (unsigned long)ctx->buf_len);
             } else {
                 (void)fprintf(stderr,
                     "[gdr-verify] GPU buf seg=%u ZEROED va=%p len=%lu "
-                    "(recv@%p size=%u); any non-zero after wait => DMA hit\n",
+                    "(recv@%p size=%u bar=%s); any non-zero after wait => DMA hit\n",
                     i, recv_base, (unsigned long)ctx->buf_len,
-                    recv_base, cfg->size);
+                    recv_base, cfg->size,
+                    perftest_gpu_has_bar_map(gbuf) ? "yes" : "no");
             }
             continue;
         }
@@ -1694,15 +1751,17 @@ static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t 
         perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
         bool all_zero = true;
 
-        if (!perftest_gpu_needs_cpu_flag(gbuf)) {
+        if (!perftest_gpu_is_device_va(gbuf)) {
             continue;
         }
-        if (perftest_cuda_set_current_ctx() != 0) {
+        if (perftest_gpu_needs_cpu_flag(gbuf) &&
+            perftest_cuda_set_current_ctx() != 0) {
             continue;
         }
-        if (write_lat_gpu_recv_all_zero(ctx->local_buf[i], cfg->size, &all_zero) != 0) {
+        if (write_lat_gpu_recv_all_zero(gbuf, ctx->local_buf[i], cfg->size,
+                &all_zero) != 0) {
             (void)fprintf(stderr,
-                "[gdr-verify] finish: D2H recv check failed seg=%u\n", i);
+                "[gdr-verify] finish: recv check failed seg=%u\n", i);
             continue;
         }
         if (all_zero) {

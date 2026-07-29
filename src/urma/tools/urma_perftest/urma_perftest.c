@@ -122,13 +122,13 @@ static void *write_dirty_thread(void *args)
     perftest_config_t *cfg = ctx_cfg->cfg;
 
     /*
-     * peermem / GDR: local_buf 是真实 GPU VA, CPU 直接写会 SIGSEGV.
-     * 原生 host 与 host-proxy (shadow) 保持原逻辑不变.
+     * peermem / GDR: local_buf 是真实 GPU VA; 即使有 BAR 映射也不在这里
+     * 做 dirty write (会干扰 write_lat flag / 测延迟). host / proxy 不变.
      */
     {
         perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, 0);
 
-        if (perftest_gpu_needs_cpu_flag(gbuf)) {
+        if (perftest_gpu_is_device_va(gbuf)) {
             (void)fprintf(stderr,
                 "write_dirty_thread: skip CPU dirty writes for %s (GPU VA)\n",
                 perftest_gpu_alloc_strategy_name(gbuf->strategy));
