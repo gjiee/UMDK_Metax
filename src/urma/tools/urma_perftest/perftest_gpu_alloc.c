@@ -49,6 +49,7 @@
 #include <unistd.h>     /* close() */
 
 #include "perftest_cuda_loader.h"
+#include "perftest_gdrcopy_loader.h"
 #include "perftest_gpu_alloc.h"
 
 #define GA_LOG(fmt, ...) \
@@ -61,9 +62,7 @@
 static unsigned g_force_fail_mask = 0;
 
 /*
- * PEERMEM / GDR 成功路径上额外申请一小段 host 内存, 供 write_lat 的
- * post_buf/poll_buf 协议走 CPU 可达地址 + 1B cuMemcpy, 不改动 URMA 注册的
- * GPU VA (local_buf / addr 仍是设备指针).
+ * PEERMEM / GDR: host scratch + 1B cuMemcpy only when GDRCopy BAR map fails.
  */
 static int alloc_cpu_flag_scratch(perftest_gpu_buffer_t *out)
 {
@@ -76,9 +75,55 @@ static int alloc_cpu_flag_scratch(perftest_gpu_buffer_t *out)
     }
     memset(p, 0, PERFTEST_GPU_CPU_FLAG_BYTES);
     out->cpu_flag = p;
-    GA_LOG("cpu_flag host scratch=%p (%zu bytes) for write_lat sentinel",
+    GA_LOG("cpu_flag host scratch=%p (%zu bytes) for write_lat D2H fallback",
            p, PERFTEST_GPU_CPU_FLAG_BYTES);
     return 0;
+}
+
+static int try_map_gpu_bar(perftest_gpu_buffer_t *out)
+{
+    perftest_gdr_mh_t mh = { 0 };
+    void *map_raw = NULL;
+    void *cpu_base = NULL;
+
+    if (out == NULL || out->gpu_ptr == NULL || out->size == 0) {
+        return -1;
+    }
+    if (perftest_gdrcopy_map(out->gpu_ptr, out->size, &map_raw, &cpu_base,
+                             &mh) != 0) {
+        GA_LOG("BAR map unavailable — write_lat flag will use 1B D2H fallback");
+        return -1;
+    }
+    out->bar_map_raw = map_raw;
+    out->bar_cpu_base = cpu_base;
+    out->bar_map_size = out->size;
+    out->bar_mh = mh.h;
+    GA_LOG("BAR map OK: gpu=%p cpu=%p size=%zu — write_lat can CPU-poll flags",
+           out->gpu_ptr, cpu_base, out->size);
+    return 0;
+}
+
+static void unmap_gpu_bar(perftest_gpu_buffer_t *buf)
+{
+    perftest_gdr_mh_t mh;
+
+    if (buf == NULL || buf->bar_map_raw == NULL) {
+        return;
+    }
+    mh.h = buf->bar_mh;
+    (void)perftest_gdrcopy_unmap(buf->bar_map_raw, buf->bar_map_size, mh);
+    buf->bar_map_raw = NULL;
+    buf->bar_cpu_base = NULL;
+    buf->bar_map_size = 0;
+    buf->bar_mh = 0;
+}
+
+static int setup_cpu_flag_access(perftest_gpu_buffer_t *out)
+{
+    if (try_map_gpu_bar(out) == 0) {
+        return 0;
+    }
+    return alloc_cpu_flag_scratch(out);
 }
 
 /* --gpu-mode 选择的入口策略. 默认 NONE = 直接 memalign. */
@@ -197,17 +242,22 @@ static int try_alloc_gdr(size_t size, size_t alignment,
     out->dmabuf_fd     = fd;
     out->dmabuf_offset = off;
     out->cpu_flag      = NULL;
+    out->bar_map_raw   = NULL;
+    out->bar_cpu_base  = NULL;
+    out->bar_map_size  = 0;
+    out->bar_mh        = 0;
     out->strategy      = PERFTEST_GPU_ALLOC_GDR;
-    if (alloc_cpu_flag_scratch(out) != 0) {
+    if (setup_cpu_flag_access(out) != 0) {
         close(fd);
         perftest_cuda_mem_free(dptr);
         memset(out, 0, sizeof(*out));
         return -1;
     }
 
-    GA_LOG("OK: dptr=%p fd=%d offset=%lu size=%zu  (caller still needs "
+    GA_LOG("OK: dptr=%p fd=%d offset=%lu size=%zu bar=%s (caller still needs "
            "urma_register_seg_dmabuf to succeed; otherwise fallback peermem/proxy)",
-           dptr, fd, (unsigned long)off, size);
+           dptr, fd, (unsigned long)off, size,
+           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback");
     return 0;
 }
 
@@ -321,18 +371,22 @@ static int try_alloc_peermem(size_t size, size_t alignment,
     out->dmabuf_fd     = -1;
     out->dmabuf_offset = 0;
     out->cpu_flag      = NULL;
+    out->bar_map_raw   = NULL;
+    out->bar_cpu_base  = NULL;
+    out->bar_map_size  = 0;
+    out->bar_mh        = 0;
     out->strategy      = PERFTEST_GPU_ALLOC_PEERMEM;
-    if (alloc_cpu_flag_scratch(out) != 0) {
+    if (setup_cpu_flag_access(out) != 0) {
         (void)perftest_cuda_mem_free(dptr);
         memset(out, 0, sizeof(*out));
         return -1;
     }
 
-    GA_LOG("OK: dptr=%p requested_size=%zu alloc_size=%zu (64KB-aligned so "
-           "kernel's nvidia_p2p_get_pages() 64KB-rounding stays within this "
-           "allocation; URMA register_seg sees GPU va, kernel ubcore pulls "
-           "page list via peer_memory_client)",
-           dptr, size, alloc_size);
+    GA_LOG("OK: dptr=%p requested_size=%zu alloc_size=%zu bar=%s "
+           "(64KB-aligned for peermem pin; flag poll via %s)",
+           dptr, size, alloc_size,
+           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback",
+           out->bar_cpu_base != NULL ? "GDRCopy BAR" : "1B D2H");
     return 0;
 }
 
@@ -596,9 +650,41 @@ int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
                                     len);
 }
 
+bool perftest_gpu_is_device_va(const perftest_gpu_buffer_t *buf)
+{
+    if (buf == NULL) {
+        return false;
+    }
+    return buf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
+           buf->strategy == PERFTEST_GPU_ALLOC_GDR;
+}
+
+bool perftest_gpu_has_bar_map(const perftest_gpu_buffer_t *buf)
+{
+    return buf != NULL && buf->bar_cpu_base != NULL && buf->gpu_ptr != NULL;
+}
+
+void *perftest_gpu_bar_from_gpu(const perftest_gpu_buffer_t *buf, void *gpu_va)
+{
+    uintptr_t off;
+
+    if (!perftest_gpu_has_bar_map(buf) || gpu_va == NULL) {
+        return NULL;
+    }
+    off = (uintptr_t)gpu_va - (uintptr_t)buf->gpu_ptr;
+    if (off >= buf->bar_map_size) {
+        return NULL;
+    }
+    return (char *)buf->bar_cpu_base + off;
+}
+
 bool perftest_gpu_needs_cpu_flag(const perftest_gpu_buffer_t *buf)
 {
     if (buf == NULL || buf->cpu_flag == NULL) {
+        return false;
+    }
+    /* BAR map takes priority: no D2H in the hot path. */
+    if (perftest_gpu_has_bar_map(buf)) {
         return false;
     }
     return buf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
@@ -631,9 +717,12 @@ void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
 {
     if (buf == NULL) return;
 
-    GA_LOG("releasing strategy=%s addr=%p gpu_ptr=%p cpu_flag=%p size=%zu fd=%d",
+    GA_LOG("releasing strategy=%s addr=%p gpu_ptr=%p cpu_flag=%p bar=%p size=%zu fd=%d",
            perftest_gpu_alloc_strategy_name(buf->strategy),
-           buf->addr, buf->gpu_ptr, buf->cpu_flag, buf->size, buf->dmabuf_fd);
+           buf->addr, buf->gpu_ptr, buf->cpu_flag, buf->bar_cpu_base,
+           buf->size, buf->dmabuf_fd);
+
+    unmap_gpu_bar(buf);
 
     if (buf->cpu_flag != NULL) {
         free(buf->cpu_flag);
