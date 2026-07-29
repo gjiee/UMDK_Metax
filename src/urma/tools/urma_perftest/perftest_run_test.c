@@ -194,6 +194,77 @@ static int write_lat_store_flag(perftest_gpu_buffer_t *gbuf, void *gpu_post_va,
     return 0;
 }
 
+/* Local half offset used by init_*_jfs_wr_sg (WRITE src / READ dst). */
+static size_t bw_local_half_off(const perftest_context_t *ctx,
+    const perftest_config_t *cfg, uint32_t index)
+{
+    if (cfg->seg_pre_jetty == false) {
+        return (size_t)(cfg->jettys + index) * ctx->buf_size;
+    }
+    return ctx->buf_size;
+}
+
+/*
+ * --gpu-mode=proxy only (proxy_pure is a no-op via perftest_gpu_proxy_stages):
+ *   WRITE/SEND: D2H into host shadow before post (in timed BW path)
+ *   READ:       H2D from host shadow after send CQE
+ */
+static int bw_proxy_stage_before_post(perftest_context_t *ctx,
+    perftest_config_t *cfg, uint32_t index)
+{
+    perftest_gpu_buffer_t *gbuf;
+    size_t off;
+    size_t len;
+
+    if (!perftest_gpu_proxy_stages()) {
+        return 0;
+    }
+    if (cfg->api_type != PERFTEST_WRITE && cfg->api_type != PERFTEST_SEND) {
+        return 0;
+    }
+    gbuf = perftest_ctx_gpu_buf(ctx, cfg, index);
+    if (gbuf == NULL) {
+        return 0;
+    }
+    off = bw_local_half_off(ctx, cfg, index);
+    len = (size_t)cfg->size * (size_t)cfg->jfs_post_list;
+    if (off >= gbuf->size) {
+        return 0;
+    }
+    if (off + len > gbuf->size) {
+        len = gbuf->size - off;
+    }
+    return perftest_gpu_stage_to_nic_range(gbuf, off, len);
+}
+
+static int bw_proxy_stage_after_cqe(perftest_context_t *ctx,
+    perftest_config_t *cfg, uint32_t index, uint32_t n_msgs)
+{
+    perftest_gpu_buffer_t *gbuf;
+    size_t off;
+    size_t len;
+
+    if (!perftest_gpu_proxy_stages() || n_msgs == 0) {
+        return 0;
+    }
+    if (cfg->api_type != PERFTEST_READ) {
+        return 0;
+    }
+    gbuf = perftest_ctx_gpu_buf(ctx, cfg, index);
+    if (gbuf == NULL) {
+        return 0;
+    }
+    off = bw_local_half_off(ctx, cfg, index);
+    len = (size_t)cfg->size * (size_t)n_msgs;
+    if (off >= gbuf->size) {
+        return 0;
+    }
+    if (off + len > gbuf->size) {
+        len = gbuf->size - off;
+    }
+    return perftest_gpu_stage_from_nic_range(gbuf, off, len);
+}
+
 run_test_ctx_t *g_duration_ctx;
 
 perftest_context_t *g_perftest_ctx;
@@ -2071,6 +2142,12 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
         return -1;
     }
 
+    if (perftest_gpu_proxy_stages() && perftest_cuda_set_current_ctx() != 0) {
+        (void)fprintf(stderr, "Failed to set CUDA ctx for proxy BW staging\n");
+        free(cr);
+        return -1;
+    }
+
     if (cfg->time_type.bs.duration == 1) {
         update_duration_state(ctx, cfg);
     }
@@ -2114,6 +2191,12 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
 
                 if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
                     break;
+                }
+                if (bw_proxy_stage_before_post(ctx, cfg, index) != 0) {
+                    (void)fprintf(stderr,
+                        "proxy stage_to_nic failed jetty=%u scnt=%lu\n",
+                        index, run_ctx->scnt[index]);
+                    goto free_cr;
                 }
                 urma_jfs_wr_t *bad_wr = NULL;
                 if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
@@ -2188,6 +2271,13 @@ static int run_once_bw(perftest_context_t *ctx, perftest_config_t *cfg)
 
                     run_ctx->ccnt[cr_id] += cfg->cq_mod;
                     tot_ccnt += cfg->cq_mod;
+
+                    if (bw_proxy_stage_after_cqe(ctx, cfg, (uint32_t)cr_id,
+                            cfg->cq_mod) != 0) {
+                        (void)fprintf(stderr,
+                            "proxy stage_from_nic failed jetty=%d\n", cr_id);
+                        goto free_cr;
+                    }
 
                     if (cfg->no_peak == false) {
                         if (tot_ccnt > tot_iters) {
@@ -2518,6 +2608,12 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
         posted_per_jetty[i] = (uint32_t)run_ctx->rposted;
     }
 
+    if (perftest_gpu_proxy_stages() && perftest_cuda_set_current_ctx() != 0) {
+        (void)fprintf(stderr, "Failed to set CUDA ctx for proxy BW staging\n");
+        ret = -1;
+        goto cleaning;
+    }
+
     if (cfg->no_peak) {
         run_ctx->tposted[0] = get_cycles();
     }
@@ -2554,6 +2650,13 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
                 }
                 if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
                     break;
+                }
+                if (bw_proxy_stage_before_post(ctx, cfg, index) != 0) {
+                    (void)fprintf(stderr,
+                        "proxy stage_to_nic failed jetty=%u scnt=%lu\n",
+                        index, run_ctx->scnt[index]);
+                    ret = -1;
+                    goto cleaning;
                 }
                 if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
                     status = urma_post_jfs_wr(ctx->jfs[index], &run_ctx->jfs_wr[index * cfg->jfs_post_list],
@@ -2777,6 +2880,12 @@ static int run_once_bi_bw(perftest_context_t *ctx, perftest_config_t *cfg)
                 } else {
                     tot_ccnt += cfg->cq_mod;
                     run_ctx->ccnt[cr_id] += cfg->cq_mod;
+                    if (bw_proxy_stage_after_cqe(ctx, cfg, cr_id, cfg->cq_mod) != 0) {
+                        (void)fprintf(stderr,
+                            "proxy stage_from_nic failed jetty=%u\n", cr_id);
+                        ret = -1;
+                        goto cleaning;
+                    }
                     if (tot_ccnt > tot_iters) {
                         tot_scredit -= cfg->cq_mod;
                     }
@@ -2979,6 +3088,15 @@ static int run_once_bw_infinite(perftest_context_t *ctx, perftest_config_t *cfg)
     cfg->iters = 0;
     cfg->last_iters = 0;
 
+    if (perftest_gpu_proxy_stages() && perftest_cuda_set_current_ctx() != 0) {
+        (void)fprintf(stderr, "Failed to set CUDA ctx for proxy BW staging\n");
+        g_perftest_ctx->infinite_print = false;
+        (void)pthread_join(print_thread, NULL);
+        free(cr);
+        free(scnt_for_jetty);
+        return -1;
+    }
+
     if (cfg->time_type.bs.duration == 1) {
         update_duration_state(ctx, cfg);
     }
@@ -3014,6 +3132,12 @@ static int run_once_bw_infinite(perftest_context_t *ctx, perftest_config_t *cfg)
                 }
                 if (cfg->time_type.bs.duration == 1 && run_ctx->state == END_STATE) {
                     break;
+                }
+                if (bw_proxy_stage_before_post(ctx, cfg, index) != 0) {
+                    (void)fprintf(stderr,
+                        "proxy stage_to_nic failed jetty=%u scnt=%lu\n",
+                        index, run_ctx->scnt[index]);
+                    goto err_exit;
                 }
                 urma_jfs_wr_t *bad_wr = NULL;
                 if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
@@ -3069,6 +3193,12 @@ static int run_once_bw_infinite(perftest_context_t *ctx, perftest_config_t *cfg)
                     cfg->iters += cfg->cq_mod;
                     tot_ccnt += cfg->cq_mod;
                     run_ctx->ccnt[cr_id] += cfg->cq_mod;
+                    if (bw_proxy_stage_after_cqe(ctx, cfg, (uint32_t)cr_id,
+                            cfg->cq_mod) != 0) {
+                        (void)fprintf(stderr,
+                            "proxy stage_from_nic failed jetty=%d\n", cr_id);
+                        goto err_exit;
+                    }
                 }
             } else if (cqe_cnt < 0) {
                 (void)fprintf(stderr, "Failed to poll jfc, cqe_cnt: %d.\n", cqe_cnt);
