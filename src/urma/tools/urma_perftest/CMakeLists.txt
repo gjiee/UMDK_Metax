@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) Huawei Technologies Co., Ltd. 2021-2025. All rights reserved.
 
-#
-# 注: 下面 4 个 perftest_mem_*.c 是 GDR (GPU Direct RDMA) 框架引入的
-# "可插拔内存后端"骨架. 当前只是 stub + 注释 + print, 假装运行成功,
-# 让 perftest_memory_ops 抽象在编译期闭环. 真正的 CUDA / ROCm 库链接
-# 会在后续 commit 中通过 option(URMA_WITH_CUDA ON) / option(URMA_WITH_ROCM ON)
-# 条件加上.
-# 详细设计与 patch 清单见 docs/urma_gdr_analysis.md.
-#
+# perftest_mem_*.c: legacy pluggable-memory stubs (compile-time only).
+# Active GPU path: perftest_gpu_alloc + cuda/gdrcopy loaders + validation.
 add_executable(urma_perftest
     urma_perftest.c
     perftest_parameters.c
@@ -20,13 +14,6 @@ add_executable(urma_perftest
     perftest_mem_rocm.c
     perftest_mem_dmabuf.c
     perftest_mem_gpu_proxy.c
-    # GPU allocator dispatched by CLI --gpu-mode={proxy|peermem|direct}.
-    # Each mode tries its own path and falls back to memalign on failure.
-    # API:        perftest_gpu_alloc.h          (set_mode / alloc / free / stage_*)
-    # CUDA glue:  perftest_cuda_loader.h        (dlopen libcuda.so.1)
-    # GDRCopy:    perftest_gdrcopy_loader.h     (dlopen libgdrapi.so for BAR poll)
-    # Validation: perftest_validation.h         (linux-rdma-style fill / check)
-    # See docs/urma_gpu_mode_cli.md for env setup tutorial.
     perftest_gpu_alloc.c
     perftest_cuda_loader.c
     perftest_gdrcopy_loader.c
@@ -48,9 +35,6 @@ target_include_directories(urma_perftest
 target_link_libraries(urma_perftest
     PRIVATE
         urma pthread m
-        # -ldl is required by perftest_cuda_loader.c / perftest_gdrcopy_loader.c
-        # (dlopen libcuda.so.1 / libgdrapi.so). Neither CUDA nor GDRCopy is
-        # linked at build time; missing runtime libs fall back gracefully.
         dl
 )
 

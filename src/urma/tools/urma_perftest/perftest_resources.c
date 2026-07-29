@@ -22,26 +22,9 @@
 #include "urma_api.h"
 #include "urma_ubagg.h"
 
-#include "urma_types.h" // for flag to ioctl 
+#include "urma_types.h"
 #include "perftest_gpu_alloc.h"
 #include "perftest_resources.h"
-
-
-#define PERFTEST_GPU_SEG_ALIGN  (64u * 1024u) //for GPU ALLIGN
-/*
- * GPU 变种命令 (read_lat_gpu / write_lat_gpu) 专用的内存追踪.
- *
- * 这是什么:
- *   register_mem() 在 GPU 变种下用 perftest_gpu_alloc_buffer 拿缓冲, 返回
- *   一个 perftest_gpu_buffer_t (含 .addr / .strategy / .gpu_ptr / fd 等).
- *   free_memory() 需要原样回收, 所以把每个 jetty 的 buffer 描述符暂存在
- *   下面这个文件级静态数组里. 这是最小侵入的做法 -- 不改 perftest_context_t.
- *
- * 一旦 perftest_context_t 的 mem_ops / gpu_bufs 字段正式加入 ABI (见
- * perftest_resources.h 注释块), 这块改成 ctx->gpu_bufs[i] 即可.
- */
-//static perftest_gpu_buffer_t *g_perftest_gpu_bufs;     // 长度 = cfg->jettys 
-//static uint32_t               g_perftest_gpu_bufs_n;
 
 #define PERFTEST_DEF_ACCESS (URMA_ACCESS_READ | URMA_ACCESS_WRITE | URMA_ACCESS_ATOMIC)
 
@@ -62,7 +45,6 @@ static const char *log_level_str[] = {
     "DEBUG"      /* URMA_VLOG_LEVEL_DEBUG */
 };
 
-//helper to get the GPU memory for proxy model
 perftest_gpu_buffer_t *perftest_ctx_gpu_buf(perftest_context_t *ctx,
                                                           const perftest_config_t *cfg,
                                                           uint32_t id)
@@ -777,7 +759,7 @@ static void free_memory(perftest_context_t *ctx, const perftest_config_t *cfg, c
         if (j < seg_num) {
             if (perftest_cmd_is_gpu(cfg->cmd) && ctx->gpu_bufs != NULL &&
                 j < ctx->gpu_bufs_n) {
-                /* GPU 变种: 委托给分配器同一套清理逻辑 (按 strategy 区分). */
+                /* Free *_gpu buffers via allocator (strategy-aware). */
                 perftest_gpu_free_buffer(&ctx->gpu_bufs[j]);
             } else if (cfg->use_huge_page == false) {
                 free(ctx->local_buf[j]);
@@ -832,12 +814,7 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     ctx->buf_len = ctx->buf_size * PERFTEST_BUF_NUM *
         ((cfg->seg_pre_jetty == true) ? 1 : cfg->jettys);
 
-    /*
-     * GPU 变种内存分配旁路:
-     *   read_lat_gpu / write_lat_gpu / read_bw_gpu / write_bw_gpu 走
-     *   perftest_gpu_alloc_buffer, 内部 GDR -> peermem -> host-proxy -> memalign
-     *   自动回退. 其它 cmd 与原来 100% 一致, 保留 use_huge_page / memalign 双分支.
-     */
+    /* *_gpu commands: allocate via --gpu-mode (fallback memalign). */
     if (perftest_cmd_is_gpu(cfg->cmd)) {
         ctx->gpu_bufs_n = seg_num;
         ctx->gpu_bufs = calloc(ctx->gpu_bufs_n, sizeof(*ctx->gpu_bufs));
@@ -936,39 +913,7 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
     for (j = 0; j < cfg->jettys; j++) {
         if (j < seg_num) {
             seg_cfg.va = (uint64_t)ctx->local_buf[j];
-            /*
-             * FIX (v2): is_gpu_seg 必须根据"实际交给 urma_register_seg() 的
-             * 这个 va 是不是真的一个 GPU 设备指针"来定，不能只看命令名字是不是
-             * *_gpu，也不能只是排除 MEMALIGN/NONE（v1 版本的这种"黑名单"写法
-             * 是错的，会把 HOST_PROXY 误判成真 GPU，见下面解释）。
-             *
-             * 参考 perftest_gpu_alloc.c 各 strategy 实际 out->addr 的取值:
-             *   - PERFTEST_GPU_ALLOC_PEERMEM (--gpu-mode=peermem):
-             *       out->addr = dptr，真实的 cuMemAlloc() GPU 设备指针，
-             *       urma_register_seg() 拿到的就是 GPU VA，需要走内核
-             *       nvidia_p2p_get_pages 那条 pin 路径 -> is_gpu_seg = 1。
-             *   - PERFTEST_GPU_ALLOC_GDR (dma-buf 方式，理论上同理):
-             *       out->addr = dptr，同样是真实 GPU VA -> is_gpu_seg = 1。
-             *   - PERFTEST_GPU_ALLOC_HOST_PROXY (--gpu-mode=proxy):
-             *       out->addr = shadow，是 cuMemAllocHost/malloc 出来的
-             *       **host** 影子缓冲区；真正的 GPU 指针存在 out->gpu_ptr 里，
-             *       只在 perftest_gpu_stage_to_nic()/stage_from_nic() 里靠
-             *       显式 cuMemcpy 做拷贝，网卡/内核从头到尾看到、注册的都是
-             *       host 内存。proxy 模式的语义就是"host 注册 + 应用层 copy"，
-             *       所以哪怕这台机器真的有 GPU、真的走通了 HOST_PROXY 策略，
-             *       也不能标 is_gpu_seg=1，否则内核会拿着这个其实是
-             *       cuMemAllocHost 出来的地址去调 GPU pin 接口，必然失败——
-             *       同时会触发 udma_u_segment.c 里"GPU 段没 grant 过、失败时
-             *       却被 ungrant"那条 bug（已修复），两个问题叠加正是之前
-             *       那次超时卡死的根因。
-             *   - PERFTEST_GPU_ALLOC_MEMALIGN / NONE:
-             *       纯 host 内存（没 GPU 或强制降级的兜底路径） -> is_gpu_seg = 0。
-             *
-             * 所以这里必须用"白名单"而不是"黑名单": 只有 strategy 真的是
-             * PEERMEM 或 GDR 时才标 is_gpu_seg=1；HOST_PROXY/MEMALIGN/NONE
-             * 以及以后任何新增的 strategy，默认都当成 host 段处理，这样才是
-             * fail-safe 的。
-             */
+            /* Only PEERMEM/GDR register a real GPU VA; proxy registers host shadow. */
             {
                 perftest_gpu_buffer_t *gbuf = (ctx->gpu_bufs != NULL && j < ctx->gpu_bufs_n)
                     ? &ctx->gpu_bufs[j] : NULL;

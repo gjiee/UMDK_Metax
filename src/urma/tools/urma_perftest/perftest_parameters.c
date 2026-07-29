@@ -70,18 +70,8 @@ static const perftest_cmd_t g_cmd[] = {
     { "write_bw",          PERFTEST_WRITE_BW },
     { "send_bw",           PERFTEST_SEND_BW },
     { "atomic_bw",         PERFTEST_ATOMIC_BW },
-    /*
-     * 与 read_lat / write_lat 完全一致, 只是 register_mem 时走 GPU 自动
-     * 回退分配链 (GDR -> peermem -> host-proxy -> memalign). 见
-     * perftest_gpu_alloc.[ch] 与 docs/urma_gpu_alloc_fallback.md.
-     */
     { "read_lat_gpu",      PERFTEST_READ_LAT_GPU },
     { "write_lat_gpu",     PERFTEST_WRITE_LAT_GPU },
-    /*
-     * 与 read_bw / write_bw 完全一致, 只是 register_mem 时走 GPU 自动
-     * 回退分配链 (GDR -> peermem -> host-proxy -> memalign). 见
-     * perftest_gpu_alloc.[ch] 与 docs/urma_gpu_alloc_fallback.md.
-     */
     { "read_bw_gpu",       PERFTEST_READ_BW_GPU },
     { "write_bw_gpu",      PERFTEST_WRITE_BW_GPU }
 };
@@ -233,13 +223,13 @@ static void init_cfg_api_type(perftest_config_t *cfg)
     switch (cfg->cmd) {
         case PERFTEST_READ_LAT:
         case PERFTEST_READ_BW:
-        case PERFTEST_READ_LAT_GPU:    /* GPU 变种, api_type 与 READ 完全一致 */
+        case PERFTEST_READ_LAT_GPU:
         case PERFTEST_READ_BW_GPU:
             cfg->api_type = PERFTEST_READ;
             break;
         case PERFTEST_WRITE_LAT:
         case PERFTEST_WRITE_BW:
-        case PERFTEST_WRITE_LAT_GPU:   /* GPU 变种, api_type 与 WRITE 完全一致 */
+        case PERFTEST_WRITE_LAT_GPU:
         case PERFTEST_WRITE_BW_GPU:
             cfg->api_type = PERFTEST_WRITE;
             break;

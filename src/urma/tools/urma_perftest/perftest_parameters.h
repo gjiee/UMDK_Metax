@@ -146,13 +146,7 @@ typedef enum perftest_cmd_type {
     PERFTEST_WRITE_BW,
     PERFTEST_SEND_BW,
     PERFTEST_ATOMIC_BW,
-    /*
-     * GPU 变种命令: 行为与 PERFTEST_READ_LAT / PERFTEST_WRITE_LAT /
-     * PERFTEST_READ_BW / PERFTEST_WRITE_BW 完全一致, 唯一区别是 register_mem()
-     * 时通过 perftest_gpu_alloc.[ch] 走
-     *   GDR -> peermem -> host-proxy -> memalign
-     * 的自动回退分配链, 让 *_gpu 命令在任意环境都能跑.
-     */
+    /* Same as host lat/bw, but buffers come from perftest_gpu_alloc. */
     PERFTEST_READ_LAT_GPU,
     PERFTEST_WRITE_LAT_GPU,
     PERFTEST_READ_BW_GPU,
@@ -160,7 +154,6 @@ typedef enum perftest_cmd_type {
     PERFTEST_CMD_NUM
 } perftest_cmd_type_t;
 
-/* helper: 判定一个 cmd 是否为 GPU 变种 (供 register_mem 区分分配路径) */
 static inline int perftest_cmd_is_gpu(perftest_cmd_type_t c)
 {
     return c == PERFTEST_READ_LAT_GPU || c == PERFTEST_WRITE_LAT_GPU ||
@@ -172,36 +165,6 @@ typedef enum perftest_jetty_mode {
     PERFTEST_JETTY_DUPLEX                    /* duplex mode only for jetty */
 } perftest_jetty_mode_t;
 
-/*
- * GDR (GPU Direct RDMA) CLI 选项扩展计划 (comment only, 本次不真正加进 enum,
- * 因为加进枚举会让 getopt_long_options 数组也得改, 形成连锁修改).
- *
- * 计划新增的 long-option:
- *
- *     --use_cuda[=GPU_ID]      启用 NVIDIA 后端
- *     --use_cuda_bus_id=BDF    CUDA 设备 PCIe BDF 选择
- *     --use_rocm[=GPU_ID]      启用 AMD ROCm 后端
- *     --use_dmabuf=FD          直接传入第三方 dma-buf fd
- *     --dmabuf_offset=OFF      与 --use_dmabuf 配套
- *     --gdr_mode={auto|direct|proxy|off}
- *                               auto    : 探测能力, 能 GDR 就 GDR, 不能就 proxy
- *                               direct  : 强制走 dma-buf 直 DMA GPU
- *                               proxy   : 强制走 host shadow stage
- *                               off     : 退化为 host 模式
- *     --gpu_touch={no|once|inf} 是否在 GPU 后台跑 touch kernel 模拟竞争
- *
- * 同时 perftest_config_t 计划新增字段 (见 docs/urma_gdr_analysis.md \xc2\xa75.4):
- *
- *     enum perftest_mem_type   mem_type;       // PERFTEST_MEM_HOST / CUDA / ROCm / DMABUF
- *     enum perftest_gdr_mode   gdr_mode;       // AUTO / DIRECT / PROXY / OFF
- *     int                      gpu_dev_id;
- *     char                    *gpu_bus_id;
- *     int                      ext_dmabuf_fd;
- *     uint64_t                 ext_dmabuf_offset;
- *
- * 给内核老兵的提示: 这些选项之间互斥关系比较多, 以后真正落地时建议在
- * check_local_cfg() 里集中校验, 避免散落到各个 case.
- */
 enum perftest_opts {
     PERFTEST_OPT_EID_IDX = 1,
     PERFTEST_OPT_RATE_LIMIT,

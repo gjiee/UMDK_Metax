@@ -2,26 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
- * 文件: perftest_gpu_alloc_test.c
- *
- * 这是什么 (What):
- *   urma_perftest 新增的 perftest_gpu_alloc.[ch] 的 *最小化* 单元测试.
- *   只验证: 在自由组合的"强制失败"位掩码下, 4 步回退链都能落到预期策略, 且
- *   每条 fallback 路径都能正确分配 & 释放, 不发生段错误 / 泄漏 (按 ASan 验).
- *
- *   该测试 *只依赖 libc + perftest_gpu_alloc.c*, 不需要 urma 库, 不需要内核
- *   头, 不需要 CUDA / ROCm SDK. 用同目录下 Makefile.test 编:
- *
- *     $ make -f Makefile.test
- *     $ ./perftest_gpu_alloc_test
- *
- * 为什么不放进 test/urma/ ?
- *   - test/urma/ 走 cmake + gtest + ubcore, 重依赖, 与本测试"无环境也跑"的
- *     目标冲突.
- *   - 此最小测试服务于"在 cloud agent / CI 上快速验证 read_lat_gpu /
- *     write_lat_gpu 不会因为环境差异崩溃"这一保底诉求.
+ * Legacy stub / test helper: perftest_gpu_alloc_test.c
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

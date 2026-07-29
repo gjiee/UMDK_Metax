@@ -2,21 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
- * 文件: perftest_validation.c
- *
- * 这是什么 (What):
- *   perftest_validation.h 的实现. 用最简单的 xorshift32 PRNG 生成确定性的
- *   字节流, fill / check 用同一 seed 即可重现.
- *
- * 设计:
- *   - 不引入 libcrypto / openssl, 仅 libc;
- *   - GPU 变种 (_gpu) 内部用 perftest_cuda_loader.h 做 H2D/D2H, 若 loader
- *     未 init 直接 return -1;
- *   - 所有 print 用 __func__ 自带前缀.
- *
- * 怎么扩展:
- *   - 想换成更强的 hash 校验 (例如 CRC64) 时, 替换 fill/check 内部循环即可,
- *     接口不动.
+ * xorshift32 fill/check + optional CUDA H2D/D2H for device buffers.
  */
 
 #ifndef _GNU_SOURCE

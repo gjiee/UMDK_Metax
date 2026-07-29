@@ -3,7 +3,9 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "perftest_gdrcopy_loader.h"
 
 #include <dlfcn.h>

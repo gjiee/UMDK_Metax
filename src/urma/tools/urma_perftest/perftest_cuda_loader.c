@@ -2,24 +2,7 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
- * 文件: perftest_cuda_loader.c
- *
- * 这是什么 (What):
- *   通过 dlopen / dlsym 把 libcuda.so.1 的若干 Driver API 引进 urma_perftest,
- *   不引入 cuda.h, 不在编译时强制要求 CUDA SDK. 思路与 linux-rdma 项目的
- *   src/cuda_loader.c 一致.
- *
- * 这对你 (内核老兵) 意味着什么:
- *   - CUDA Driver API 的函数签名我们用 typedef 重写一遍, 与你在内核里给某
- *     个 vendor 接口写 typedef wrapper 完全同构.
- *   - cuda.h 里那些 enum (CUresult / CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD) 是
- *     稳定 ABI, 在这里以纯整数常量写出来, 让 build 时不用拉头文件.
- *
- * 设计要点:
- *   - 所有 dlsym 失败都让 perftest_cuda_is_loaded() 返回 0, 上层应当 fallback;
- *   - 任意一处运行时 CUDA 报错都 fprintf __func__, 与 perftest_gpu_alloc 风格
- *     一致;
- *   - 不做线程安全 (urma_perftest 单进程单线程语义; 多线程 perftest 之后再扩).
+ * dlopen/dlsym wrappers for libcuda.so.1 (no cuda.h at build time).
  */
 
 #ifndef _GNU_SOURCE
