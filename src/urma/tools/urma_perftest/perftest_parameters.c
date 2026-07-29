@@ -196,10 +196,11 @@ default: disable.\n");
     (void)printf("  --gpu-mode={proxy|proxy_pure|peermem|direct}\n");
     (void)printf("                              Select GPU memory allocation for *_gpu commands.\n");
     (void)printf("                              Default (flag absent) = memalign.\n");
-    (void)printf("                                proxy      : host shadow + GPU; write_lat stages\n");
-    (void)printf("                                             D2H/H2D in the timed path.\n");
-    (void)printf("                                proxy_pure : same alloc as proxy; write_lat does\n");
-    (void)printf("                                             NOT stage (NIC-on-shadow only).\n");
+    (void)printf("                                proxy      : host shadow + GPU; BW/LAT timed path\n");
+    (void)printf("                                             includes staging (WRITE: D2H before\n");
+    (void)printf("                                             post; READ: H2D after CQE; LAT: both).\n");
+    (void)printf("                                proxy_pure : same alloc as proxy; no staging in\n");
+    (void)printf("                                             BW/LAT (NIC-on-shadow only).\n");
     (void)printf("                                peermem    : cuMemAlloc GPU VA + peermem pin.\n");
     (void)printf("                                direct     : cuMemAlloc + dma-buf fd export.\n");
 }

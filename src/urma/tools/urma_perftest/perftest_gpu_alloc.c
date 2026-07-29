@@ -127,7 +127,7 @@ int perftest_gpu_mode_from_string(const char *s, perftest_gpu_mode_t *out)
 
 bool perftest_gpu_proxy_stages(void)
 {
-    /* Only classic proxy includes D2H/H2D in write_lat; proxy_pure does not. */
+    /* Only classic proxy stages in BW/LAT timed paths; proxy_pure does not. */
     return g_gpu_mode == PERFTEST_GPU_MODE_PROXY;
 }
 

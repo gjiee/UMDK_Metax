@@ -5,8 +5,9 @@
  * GPU buffer alloc for *_gpu perftest commands, selected by --gpu-mode:
  *   none | proxy | proxy_pure | peermem | direct(dma-buf), with memalign fallback.
  *
- * proxy      : host shadow + GPU; write_lat stages D2H/H2D in the timed path.
- * proxy_pure : same alloc/register as proxy; write_lat does NOT stage (NIC-only).
+ * proxy      : host shadow + GPU; BW/LAT timed path includes staging
+ *              (WRITE D2H before post, READ H2D after CQE, LAT both).
+ * proxy_pure : same alloc/register as proxy; BW/LAT do NOT stage (NIC-only).
  */
 
 #ifndef PERFTEST_GPU_ALLOC_H
