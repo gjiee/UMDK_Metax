@@ -105,22 +105,30 @@ perftest_gpu_mode_t perftest_gpu_get_mode(void)
 const char *perftest_gpu_mode_name(perftest_gpu_mode_t m)
 {
     switch (m) {
-        case PERFTEST_GPU_MODE_NONE:    return "none";
-        case PERFTEST_GPU_MODE_PROXY:   return "proxy";
-        case PERFTEST_GPU_MODE_PEERMEM: return "peermem";
-        case PERFTEST_GPU_MODE_DIRECT:  return "direct";
-        default:                        return "?";
+        case PERFTEST_GPU_MODE_NONE:       return "none";
+        case PERFTEST_GPU_MODE_PROXY:      return "proxy";
+        case PERFTEST_GPU_MODE_PROXY_PURE: return "proxy_pure";
+        case PERFTEST_GPU_MODE_PEERMEM:    return "peermem";
+        case PERFTEST_GPU_MODE_DIRECT:     return "direct";
+        default:                            return "?";
     }
 }
 
 int perftest_gpu_mode_from_string(const char *s, perftest_gpu_mode_t *out)
 {
     if (s == NULL || out == NULL) return -1;
-    if (strcmp(s, "none")    == 0) { *out = PERFTEST_GPU_MODE_NONE;    return 0; }
-    if (strcmp(s, "proxy")   == 0) { *out = PERFTEST_GPU_MODE_PROXY;   return 0; }
-    if (strcmp(s, "peermem") == 0) { *out = PERFTEST_GPU_MODE_PEERMEM; return 0; }
-    if (strcmp(s, "direct")  == 0) { *out = PERFTEST_GPU_MODE_DIRECT;  return 0; }
+    if (strcmp(s, "none")       == 0) { *out = PERFTEST_GPU_MODE_NONE;       return 0; }
+    if (strcmp(s, "proxy")      == 0) { *out = PERFTEST_GPU_MODE_PROXY;      return 0; }
+    if (strcmp(s, "proxy_pure") == 0) { *out = PERFTEST_GPU_MODE_PROXY_PURE; return 0; }
+    if (strcmp(s, "peermem")    == 0) { *out = PERFTEST_GPU_MODE_PEERMEM;    return 0; }
+    if (strcmp(s, "direct")     == 0) { *out = PERFTEST_GPU_MODE_DIRECT;     return 0; }
     return -1;
+}
+
+bool perftest_gpu_proxy_stages(void)
+{
+    /* Only classic proxy includes D2H/H2D in write_lat; proxy_pure does not. */
+    return g_gpu_mode == PERFTEST_GPU_MODE_PROXY;
 }
 
 void perftest_gpu_alloc_set_force_fail_mask(unsigned mask)
@@ -397,12 +405,16 @@ int perftest_gpu_alloc_buffer(size_t size, size_t alignment,
             GA_LOG("mode=peermem failed, fallback to memalign");
             break;
         case PERFTEST_GPU_MODE_PROXY:
+        case PERFTEST_GPU_MODE_PROXY_PURE:
             if (try_alloc_host_proxy(size, alignment, out) == 0) {
-                GA_LOG("DONE via %s",
-                       perftest_gpu_alloc_strategy_name(out->strategy));
+                GA_LOG("DONE via %s (mode=%s stage=%s)",
+                       perftest_gpu_alloc_strategy_name(out->strategy),
+                       perftest_gpu_mode_name(g_gpu_mode),
+                       perftest_gpu_proxy_stages() ? "on" : "off");
                 return 0;
             }
-            GA_LOG("mode=proxy failed, fallback to memalign");
+            GA_LOG("mode=%s failed, fallback to memalign",
+                   perftest_gpu_mode_name(g_gpu_mode));
             break;
         case PERFTEST_GPU_MODE_NONE:
         default:
@@ -418,14 +430,15 @@ int perftest_gpu_alloc_buffer(size_t size, size_t alignment,
     return -1;
 }
 
-/* HOST_PROXY only: D2H before post / H2D after CR. Other strategies are no-ops. */
+/* HOST_PROXY + --gpu-mode=proxy only. proxy_pure and other modes are no-ops. */
 int perftest_gpu_stage_to_nic(perftest_gpu_buffer_t *buf, size_t len)
 {
     if (buf == NULL || buf->size == 0 || len > buf->size) {
         GA_LOG("invalid arg buf=%p len=%zu", (void *)buf, len);
         return -1;
     }
-    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY) {
+    if (!perftest_gpu_proxy_stages() ||
+        buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY) {
         return 0;
     }
     if (buf->gpu_ptr == NULL || buf->addr == NULL) {
@@ -445,7 +458,8 @@ int perftest_gpu_stage_from_nic(perftest_gpu_buffer_t *buf, size_t len)
         GA_LOG("invalid arg buf=%p len=%zu", (void *)buf, len);
         return -1;
     }
-    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY) {
+    if (!perftest_gpu_proxy_stages() ||
+        buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY) {
         return 0;
     }
     if (buf->gpu_ptr == NULL || buf->addr == NULL) {
@@ -465,12 +479,18 @@ int perftest_gpu_stage_to_nic_range(perftest_gpu_buffer_t *buf,
     if (buf == NULL || off + len > buf->size)
         return -1;
 
-    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY)
+    if (!perftest_gpu_proxy_stages() ||
+        buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY)
         return 0;
 
-    return perftest_cuda_memcpy_d2h((char *)buf->addr + off,
-                                    (void *)((uintptr_t)buf->gpu_ptr + off),
-                                    len);
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_d2h((char *)buf->addr + off,
+                                        (void *)((uintptr_t)buf->gpu_ptr + off),
+                                        len);
+    }
+    memcpy((char *)buf->addr + off,
+           (void *)((uintptr_t)buf->gpu_ptr + off), len);
+    return 0;
 }
 
 int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
@@ -479,12 +499,18 @@ int perftest_gpu_stage_from_nic_range(perftest_gpu_buffer_t *buf,
     if (buf == NULL || off + len > buf->size)
         return -1;
 
-    if (buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY)
+    if (!perftest_gpu_proxy_stages() ||
+        buf->strategy != PERFTEST_GPU_ALLOC_HOST_PROXY)
         return 0;
 
-    return perftest_cuda_memcpy_h2d((void *)((uintptr_t)buf->gpu_ptr + off),
-                                    (char *)buf->addr + off,
-                                    len);
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_h2d((void *)((uintptr_t)buf->gpu_ptr + off),
+                                        (char *)buf->addr + off,
+                                        len);
+    }
+    memcpy((void *)((uintptr_t)buf->gpu_ptr + off),
+           (char *)buf->addr + off, len);
+    return 0;
 }
 
 bool perftest_gpu_is_device_va(const perftest_gpu_buffer_t *buf)

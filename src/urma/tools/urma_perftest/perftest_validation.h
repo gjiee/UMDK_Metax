@@ -4,6 +4,10 @@
  *
  * Buffer fill/check helpers for host and CUDA device memory.
  * check_* returns mismatched byte count (0 = PASS); GPU paths use H2D/D2H.
+ *
+ * Compile-time gate for diagnostic validation / gdr-verify on the hot path:
+ *   -DPERFTEST_ENABLE_GPU_DEBUG=1  (or cmake -DPERFTEST_ENABLE_GPU_DEBUG=ON)
+ * Default is off: helpers remain linked, but call sites should no-op.
  */
 
 #ifndef PERFTEST_VALIDATION_H
@@ -12,6 +16,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef PERFTEST_ENABLE_GPU_DEBUG
+#define PERFTEST_ENABLE_GPU_DEBUG 0
+#endif
 
 #ifdef __cplusplus
 extern "C" {

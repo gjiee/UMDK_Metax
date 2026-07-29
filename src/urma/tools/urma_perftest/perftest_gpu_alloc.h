@@ -3,7 +3,10 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
  * GPU buffer alloc for *_gpu perftest commands, selected by --gpu-mode:
- *   none | proxy | peermem | direct(dma-buf), with memalign fallback.
+ *   none | proxy | proxy_pure | peermem | direct(dma-buf), with memalign fallback.
+ *
+ * proxy      : host shadow + GPU; write_lat stages D2H/H2D in the timed path.
+ * proxy_pure : same alloc/register as proxy; write_lat does NOT stage (NIC-only).
  */
 
 #ifndef PERFTEST_GPU_ALLOC_H
@@ -18,10 +21,11 @@ extern "C" {
 #endif
 
 typedef enum perftest_gpu_mode {
-    PERFTEST_GPU_MODE_NONE    = 0,
-    PERFTEST_GPU_MODE_PROXY   = 1,
-    PERFTEST_GPU_MODE_PEERMEM = 2,
-    PERFTEST_GPU_MODE_DIRECT  = 3,
+    PERFTEST_GPU_MODE_NONE       = 0,
+    PERFTEST_GPU_MODE_PROXY      = 1,
+    PERFTEST_GPU_MODE_PEERMEM    = 2,
+    PERFTEST_GPU_MODE_DIRECT     = 3,
+    PERFTEST_GPU_MODE_PROXY_PURE = 4,
 } perftest_gpu_mode_t;
 
 typedef enum perftest_gpu_alloc_strategy {
@@ -55,6 +59,9 @@ perftest_gpu_mode_t perftest_gpu_get_mode(void);
 const char         *perftest_gpu_mode_name(perftest_gpu_mode_t m);
 int                 perftest_gpu_mode_from_string(const char *s,
                                                   perftest_gpu_mode_t *out);
+
+/* True only for --gpu-mode=proxy (not proxy_pure). */
+bool perftest_gpu_proxy_stages(void);
 
 int  perftest_gpu_stage_to_nic(perftest_gpu_buffer_t *buf, size_t len);
 int  perftest_gpu_stage_from_nic(perftest_gpu_buffer_t *buf, size_t len);

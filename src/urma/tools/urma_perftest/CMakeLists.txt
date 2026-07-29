@@ -3,6 +3,9 @@
 
 # perftest_mem_*.c: legacy pluggable-memory stubs (compile-time only).
 # Active GPU path: perftest_gpu_alloc + cuda/gdrcopy loaders + validation.
+option(PERFTEST_ENABLE_GPU_DEBUG
+    "Enable GPU validation/gdr-verify diagnostics in urma_perftest" OFF)
+
 add_executable(urma_perftest
     urma_perftest.c
     perftest_parameters.c
@@ -24,6 +27,10 @@ set_target_properties(urma_perftest
     PROPERTIES
         C_STANDARD 99
 )
+
+if(PERFTEST_ENABLE_GPU_DEBUG)
+    target_compile_definitions(urma_perftest PRIVATE PERFTEST_ENABLE_GPU_DEBUG=1)
+endif()
 
 target_include_directories(urma_perftest
     PRIVATE

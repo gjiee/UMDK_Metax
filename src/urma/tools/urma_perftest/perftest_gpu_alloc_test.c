@@ -92,7 +92,15 @@ int main(int argc, char **argv)
     run_case("mode=PROXY with sim -> HOST_PROXY",
              0,
              PERFTEST_GPU_ALLOC_HOST_PROXY);
+    EXPECT(perftest_gpu_proxy_stages() == true, "proxy stages on");
 
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_PROXY_PURE);
+    run_case("mode=PROXY_PURE with sim -> HOST_PROXY",
+             0,
+             PERFTEST_GPU_ALLOC_HOST_PROXY);
+    EXPECT(perftest_gpu_proxy_stages() == false, "proxy_pure stages off");
+
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_PROXY);
     /*
      * 强制 host-proxy 失败, 仍走 fallback memalign.
      */
@@ -124,6 +132,8 @@ int main(int argc, char **argv)
         perftest_gpu_mode_t m;
         EXPECT(perftest_gpu_mode_from_string("proxy",   &m) == 0 &&
                m == PERFTEST_GPU_MODE_PROXY, "from_string proxy");
+        EXPECT(perftest_gpu_mode_from_string("proxy_pure", &m) == 0 &&
+               m == PERFTEST_GPU_MODE_PROXY_PURE, "from_string proxy_pure");
         EXPECT(perftest_gpu_mode_from_string("peermem", &m) == 0 &&
                m == PERFTEST_GPU_MODE_PEERMEM, "from_string peermem");
         EXPECT(perftest_gpu_mode_from_string("direct",  &m) == 0 &&
