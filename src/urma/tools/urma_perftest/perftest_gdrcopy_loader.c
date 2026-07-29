@@ -3,7 +3,9 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include "perftest_gdrcopy_loader.h"
 
 #include <dlfcn.h>
@@ -63,9 +65,60 @@ static int env_disabled(void)
     return (e != NULL && e[0] == '1' && e[1] == '\0');
 }
 
+static void *try_dlopen_gdrapi(const char **opened_path)
+{
+    /*
+     * Default linker path often omits /usr/local/lib (common gdrcopy
+     * prefix install). Try sonames first, then absolute fallbacks.
+     */
+    static const char *const candidates[] = {
+        "libgdrapi.so.2",
+        "libgdrapi.so",
+        "/usr/local/lib/libgdrapi.so.2",
+        "/usr/local/lib/libgdrapi.so",
+        "/usr/local/lib64/libgdrapi.so.2",
+        "/usr/local/lib64/libgdrapi.so",
+        "/usr/lib64/libgdrapi.so.2",
+        "/usr/lib64/libgdrapi.so",
+        "/usr/lib/libgdrapi.so.2",
+        "/usr/lib/libgdrapi.so",
+        "/usr/lib/x86_64-linux-gnu/libgdrapi.so.2",
+        "/usr/lib/x86_64-linux-gnu/libgdrapi.so",
+        "/usr/lib/aarch64-linux-gnu/libgdrapi.so.2",
+        "/usr/lib/aarch64-linux-gnu/libgdrapi.so",
+        NULL,
+    };
+    const char *env = getenv("PERFTEST_GDRCOPY_LIB");
+    void *lib;
+    int i;
+
+    if (env != NULL && env[0] != '\0') {
+        lib = dlopen(env, RTLD_LAZY);
+        if (lib != NULL) {
+            if (opened_path != NULL) {
+                *opened_path = env;
+            }
+            return lib;
+        }
+        GDR_LOG("PERFTEST_GDRCOPY_LIB=%s failed: %s", env, dlerror());
+    }
+
+    for (i = 0; candidates[i] != NULL; i++) {
+        (void)dlerror();
+        lib = dlopen(candidates[i], RTLD_LAZY);
+        if (lib != NULL) {
+            if (opened_path != NULL) {
+                *opened_path = candidates[i];
+            }
+            return lib;
+        }
+    }
+    return NULL;
+}
+
 int perftest_gdrcopy_loader_init(void)
 {
-    const char *soname;
+    const char *opened = NULL;
 
     if (env_disabled()) {
         GDR_LOG("disabled by PERFTEST_DISABLE_GDRCOPY=1");
@@ -76,18 +129,12 @@ int perftest_gdrcopy_loader_init(void)
         return 0;
     }
 
-    soname = getenv("PERFTEST_GDRCOPY_LIB");
-    if (soname == NULL || soname[0] == '\0') {
-        soname = "libgdrapi.so.2";
-    }
-
-    g_lib = dlopen(soname, RTLD_LAZY);
+    g_lib = try_dlopen_gdrapi(&opened);
     if (g_lib == NULL) {
-        g_lib = dlopen("libgdrapi.so", RTLD_LAZY);
-    }
-    if (g_lib == NULL) {
-        GDR_LOG("FAIL: dlopen libgdrapi (%s) — install gdrcopy / libgdrapi",
-                dlerror());
+        GDR_LOG("FAIL: dlopen libgdrapi — install gdrcopy, or "
+                "export PERFTEST_GDRCOPY_LIB=/usr/local/lib/libgdrapi.so.2 "
+                "(and/or: echo /usr/local/lib > /etc/ld.so.conf.d/gdrcopy.conf "
+                "&& ldconfig)");
         return -1;
     }
 
@@ -131,7 +178,8 @@ int perftest_gdrcopy_loader_init(void)
 
     g_loaded = 1;
     g_refcnt = 1;
-    GDR_LOG("OK: %s opened, gdr handle ready (BAR map for flag poll)", soname);
+    GDR_LOG("OK: %s opened, gdr handle ready (BAR map for flag poll)",
+            opened != NULL ? opened : "libgdrapi");
     return 0;
 }
 

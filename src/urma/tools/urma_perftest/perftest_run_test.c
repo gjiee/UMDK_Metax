@@ -49,13 +49,7 @@
 #define PERFTEST_IMM_DATA (0x20230416)
 #define PERFTEST_FLAG_USER_CTX (63)
 
-/*
- * write_lat 用最后 1 字节做 ping-pong 信号.
- *   host / proxy: 直接 *poll_buf / *post_buf
- *   peermem/GDR + GDRCopy BAR: poll/post 指向 BAR CPU 映射 (无 D2H 热路径)
- *   peermem/GDR 无 BAR: cpu_flag + 1B cuMemcpy 回退
- * URMA WR 始终指向 GPU VA.
- */
+/* write_lat last-byte flag: BAR map when available, else 1B D2H/H2D fallback. */
 #define PERFTEST_GPU_ZERO_POLL_LOG_EVERY 1000000u
 
 static void write_lat_bind_flag_ptrs(perftest_gpu_buffer_t *gbuf,
@@ -76,18 +70,23 @@ static void write_lat_bind_flag_ptrs(perftest_gpu_buffer_t *gbuf,
     bar_poll = perftest_gpu_bar_from_gpu(gbuf, gpu_poll_va);
     bar_post = perftest_gpu_bar_from_gpu(gbuf, gpu_post_va);
     if (bar_poll == NULL || bar_post == NULL) {
+#if PERFTEST_ENABLE_GPU_DEBUG
         (void)fprintf(stderr,
             "[gdrcopy] WARN: bar_from_gpu failed; keeping GPU VA (unsafe)\n");
+#endif
         return;
     }
     *poll_buf = (volatile char *)bar_poll;
     *post_buf = (volatile char *)bar_post;
+#if PERFTEST_ENABLE_GPU_DEBUG
     (void)fprintf(stderr,
         "[gdrcopy] write_lat flag poll/store via BAR cpu map "
         "(poll=%p post=%p; no D2H hot path)\n",
         bar_poll, bar_post);
+#endif
 }
 
+#if PERFTEST_ENABLE_GPU_DEBUG
 static int write_lat_gpu_recv_all_zero(perftest_gpu_buffer_t *gbuf,
     void *gpu_recv, uint32_t nbytes, bool *out_all_zero)
 {
@@ -103,7 +102,6 @@ static int write_lat_gpu_recv_all_zero(perftest_gpu_buffer_t *gbuf,
         return 0;
     }
 
-    /* Prefer BAR read for diagnostics when mapped. */
     bar = perftest_gpu_bar_from_gpu(gbuf, gpu_recv);
     if (bar != NULL) {
         for (i = 0; i < nbytes; i++) {
@@ -132,6 +130,7 @@ static int write_lat_gpu_recv_all_zero(perftest_gpu_buffer_t *gbuf,
     free(tmp);
     return 0;
 }
+#endif /* PERFTEST_ENABLE_GPU_DEBUG */
 
 static int write_lat_wait_flag(perftest_gpu_buffer_t *gbuf, void *gpu_poll_va,
     volatile char *poll_buf, char expected, volatile duration_states_t *state,
@@ -139,12 +138,18 @@ static int write_lat_wait_flag(perftest_gpu_buffer_t *gbuf, void *gpu_poll_va,
 {
     if (perftest_gpu_needs_cpu_flag(gbuf)) {
         char b;
+#if PERFTEST_ENABLE_GPU_DEBUG
         uint64_t spins = 0;
+#else
+        (void)gpu_recv_base;
+        (void)recv_bytes;
+#endif
 
         do {
             if (perftest_gpu_flag_load(gbuf, gpu_poll_va, &b) != 0) {
                 return -1;
             }
+#if PERFTEST_ENABLE_GPU_DEBUG
             spins++;
             if ((spins % PERFTEST_GPU_ZERO_POLL_LOG_EVERY) == 0 &&
                 gpu_recv_base != NULL && recv_bytes > 0) {
@@ -170,6 +175,7 @@ static int write_lat_wait_flag(perftest_gpu_buffer_t *gbuf, void *gpu_poll_va,
                         (int)expected, (int)b);
                 }
             }
+#endif
         } while (b != expected && *state != END_STATE);
         return 0;
     }
@@ -447,7 +453,7 @@ static void *run_write_lat_simplex(void *arg)
 
     write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
 
-    /* peermem/GDR: 清零两侧 flag, 避免显存未初始化导致假完成. */
+    /* Clear both flags so stale GPU memory cannot look like completion. */
     if (perftest_gpu_is_device_va(gbuf)) {
         if (perftest_gpu_needs_cpu_flag(gbuf) &&
             perftest_cuda_set_current_ctx() != 0) {
@@ -1587,8 +1593,8 @@ static void *run_write_lat_duplex(void *arg)
                 (void)fprintf(stderr, "Failed GPU flag poll, id:%u, rcnt:%lu\n", id, rcnt);
                 goto free_cr;
             }
-            //For proxy
-            if (run_ctx->state != END_STATE && gbuf &&  gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY) {
+            /* --gpu-mode=proxy only (proxy_pure skips staging). */
+            if (run_ctx->state != END_STATE && gbuf && perftest_gpu_proxy_stages()) {
                 if (perftest_gpu_stage_from_nic_range(gbuf, 0, cfg->size) != 0) {
                     fprintf(stderr, "stage_from_nic failed, id:%u, rcnt:%lu\n", id, rcnt);
                     goto free_cr;
@@ -1602,8 +1608,7 @@ static void *run_write_lat_duplex(void *arg)
             }
 
             scnt += cfg->jfs_post_list;
-            //For proxy 
-            if (gbuf && gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY) {
+            if (gbuf && perftest_gpu_proxy_stages()) {
                 if (perftest_gpu_stage_to_nic_range(gbuf, ctx->buf_size, cfg->size) != 0) {
                     fprintf(stderr, "stage_to_nic failed, id:%u, scnt:%lu\n", id, scnt);
                     goto free_cr;
@@ -1653,11 +1658,8 @@ free_cr:
 }
 
 
-/*
- * peermem/GDR: 整段 GPU buf 清 0. 之后只要对端 DMA 打到 recv, 出现非 0
- * 即视为 hit (内容对错无所谓). Host/proxy 仍走原来的 plant/fill.
- * Prefer BAR memset when GDRCopy mapped (avoids H2D for prepare).
- */
+#if PERFTEST_ENABLE_GPU_DEBUG
+/* peermem/GDR diagnostic: zero GPU buf; prefer BAR memset when mapped. */
 static int write_lat_gpu_zero_buffer(perftest_gpu_buffer_t *gbuf, void *gpu_va,
     size_t nbytes)
 {
@@ -1704,10 +1706,6 @@ static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t
         void *send_base = (char *)ctx->local_buf[i] + ctx->buf_size;
 
         if (is_dev) {
-            /*
-             * 整段 (recv+send) 清 0 (BAR 或 H2D). 等待期间 recv 不再被本端写入,
-             * 只靠对端 DMA; 发端仍会在 post 前写 send 侧 flag.
-             */
             if (write_lat_gpu_zero_buffer(gbuf, recv_base, ctx->buf_len) != 0) {
                 (void)fprintf(stderr,
                     "[gdr-verify] FAIL: zero GPU buf seg=%u va=%p len=%lu\n",
@@ -1774,11 +1772,11 @@ static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t 
                 "[gdr-verify] finish: GPU recv[%u] @%p NON-ZERO "
                 "(DMA hit, content ignored)\n",
                 cfg->size, ctx->local_buf[i]);
-            /* 顺带 dump 前缀便于肉眼看. */
             (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
         }
     }
 }
+#endif /* PERFTEST_ENABLE_GPU_DEBUG */
 
 static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
 {
@@ -1789,7 +1787,9 @@ static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
         return ret;
     }
 
+#if PERFTEST_ENABLE_GPU_DEBUG
     write_lat_gdr_eye_prepare(ctx, cfg);
+#endif
 
     if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
         ret = run_lat_test(ctx, cfg, run_write_lat_simplex);
@@ -1797,7 +1797,9 @@ static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
         ret = run_lat_test(ctx, cfg, run_write_lat_duplex);
     }
 
+#if PERFTEST_ENABLE_GPU_DEBUG
     write_lat_gdr_eye_finish(ctx, cfg);
+#endif
 
     destroy_jfs_wr(ctx);
 

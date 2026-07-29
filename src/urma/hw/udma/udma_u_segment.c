@@ -19,8 +19,6 @@ struct udma_register_seg_ucmd {
 	uint32_t reserved;
 };
 
-
-
 static void udma_u_init_seg_cfg(urma_context_t *urma_ctx, urma_seg_cfg_t *seg_cfg,
 				struct udma_u_segment *seg)
 {
@@ -34,7 +32,7 @@ static void udma_u_init_seg_cfg(urma_context_t *urma_ctx, urma_seg_cfg_t *seg_cf
 	seg->urma_tseg.token_id = seg_cfg->token_id;
 	seg->len = seg_cfg->len;
 	seg->va = seg_cfg->va;
-	seg->is_gpu_seg = (seg_cfg->is_gpu_seg != 0);   // for GDR TEST
+	seg->is_gpu_seg = (seg_cfg->is_gpu_seg != 0);
 	if (seg_cfg->flag.bs.token_policy != URMA_TOKEN_NONE) {
 		seg->token_value.token = seg_cfg->token_value.token;
 		seg->token_value_valid = true;
@@ -100,13 +98,13 @@ static int udma_exec_register_seg_cmd(urma_context_t *urma_ctx,
 				      urma_seg_cfg_t *seg_cfg,
 				      urma_target_seg_t *urma_tseg)
 {
-	struct udma_register_seg_ucmd ucmd = { 0 }; //GDR TEST
+	struct udma_register_seg_ucmd ucmd = { 0 };
 	urma_cmd_udrv_priv_t udata = {};
 	int ret;
 
 	if (!to_udma_u_ctx(urma_ctx)->sva_sep_mode_en && seg_cfg->flag.bs.non_pin)
 		return 0;
-	//fill the GPU info
+
 	if (seg_cfg->is_gpu_seg) {
 		ucmd.is_gpu_seg = 1;
 		udata.in_addr = (uint64_t)(uintptr_t)&ucmd;
@@ -143,7 +141,7 @@ static void udma_u_ungrant_seg(struct udma_u_segment *seg)
 	if (ret)
 		UDMA_LOG_ERR("ungrant segment failed, ret = %d.\n", ret);
 }
-// kernel entry
+
 urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 				       urma_seg_cfg_t *seg_cfg)
 {
@@ -162,14 +160,13 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 
 	udma_u_init_seg_cfg(urma_ctx, seg_cfg, seg);
 
-	//if (!seg->is_gpu_seg) {                       
-		ret = udma_u_grant_segment(seg);
-		if (ret) {
-			UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",
-				     seg_cfg->flag.bs.access, ret);
-			goto err_ummu_grant;
-		}
-	//}
+	/* Host and GPU segs both need MAPT grant (GPU skip was a test mistake). */
+	ret = udma_u_grant_segment(seg);
+	if (ret) {
+		UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",
+			     seg_cfg->flag.bs.access, ret);
+		goto err_ummu_grant;
+	}
 
 	ret = udma_exec_register_seg_cmd(urma_ctx, seg_cfg, &seg->urma_tseg);
 	if (ret)
@@ -178,17 +175,7 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 	return &seg->urma_tseg;
 
 err_pin_segment:
-	/*
-	 * FIX: 只有真正调过 udma_u_grant_segment() 的段（!seg->is_gpu_seg）
-	 * 才需要 ungrant。GPU 段从没 grant 过，如果 udma_exec_register_seg_cmd()
-	 * 在这里失败（比如内核 GPU pin 路径强制返回错误做测试、或者真实
-	 * pin 失败），原来这里会无条件调 udma_u_ungrant_seg(seg)，对一个
-	 * 从未 grant 过的 GPU 段做 ungrant —— ummu_ungrant() 对"从未 grant
-	 * 过的地址"的行为未知（可能报错，也可能卡住/未定义），是之前
-	 * 内核那边一强制返回错误、这边就疑似卡死的直接原因。
-	 */
-//	if (!seg->is_gpu_seg)
-		udma_u_ungrant_seg(seg);
+	udma_u_ungrant_seg(seg);
 err_ummu_grant:
 	free(seg);
 	return NULL;
@@ -210,8 +197,7 @@ urma_status_t udma_u_unregister_seg(urma_target_seg_t *target_seg)
 	}
 
 common_process:
-	if (!seg->is_gpu_seg) //GDR TEST, GPU NO GRANT
-		udma_u_ungrant_seg(seg);
+	udma_u_ungrant_seg(seg);
 	seg->token_value.token = 0;
 	free(seg);
 
@@ -260,49 +246,3 @@ urma_status_t udma_u_unimport_seg(urma_target_seg_t *target_seg)
 
 	return URMA_SUCCESS;
 }
-
-/* =========================================================================
- * GDR (GPU Direct RDMA) provider hook -- skeleton.
- *
- * 这是什么 (What):
- *   HiSilicon udma 用户态 provider 的"dma-buf 注册段"实现.
- *   是 urma_seg_dmabuf.c::urma_register_seg_dmabuf() 真正落地的函数.
- *
- *   一旦 urma_ops 加上 register_seg_dmabuf 字段 (见 urma_provider.h 注释块),
- *   udma 在 ops 注册入口里挂载:
- *
- *       static urma_ops_t g_udma_ops = {
- *           ...
- *           .register_seg          = udma_u_register_seg,
- *           .unregister_seg        = udma_u_unregister_seg,
- *           .register_seg_dmabuf   = udma_u_register_seg_dmabuf,   // <-- 新
- *           .query_dmabuf_caps     = udma_u_query_dmabuf_caps,     // <-- 新
- *           ...
- *       };
- *
- * 怎么实现 
- *   用户态这一层做的事和现有 udma_u_register_seg() 几乎一样, 区别只有两点:
- *
- *     1) 不再调 ummu_grant() 把 va 翻译成 IPA (因为 dma-buf 由内核
- *        ubcore + ummu 拿 sg_table 写映射, 不走 SVA 一这条);
- *     2) 在 udata.in_*** 里塞 dmabuf_fd / dmabuf_offset, 走
- *        urma_cmd_register_seg() 一次性把 fd 透传给内核.
- *
- *   完整流程 (待 ABI patch 后):
- *     a. udma_u_check_seg_cfg(): 允许 va==0; flag.bs.mem_type==DMABUF;
- *     b. udma_u_init_seg_cfg(): 把 dmabuf_fd/offset 缓存到 udma_u_segment;
- *     c. urma_cmd_register_seg(ctx, &tseg, cfg, &udata): 透传 fd/offset;
- *     d. 内核 uburma -> ubcore_register_seg_dmabuf() -> dma_buf_get +
- *        dma_buf_attach(&nic->dev) + dma_buf_map_attachment ->
- *        ummu_register_sgt() (新增) 把 sg_table 写进 NIC MAPT;
- *     e. 返回 urma_target_seg_t.
- *
- * 当前阶段 (Current state):
- *   - register_seg_dmabuf 字段还未真正加进 urma_ops, 因此本 stub *不会被*
- *     liburma 调到. 但保留这个函数, 让后续 ABI 启用日的 patch 改动量最小.
- *   - 函数体只 print + 返回 NULL, 假装"驱动还不支持".
- *   - 同时给一个 udma_u_query_dmabuf_caps 的 stub.
- *
- *   你以前在 RDMA peermem 路径下熟悉的 nvidia_p2p_get_pages() 这条不要走,
- *   URMA 内核侧只走 dma-buf, 维护更简单且与 5.x 内核 mainline 一致.
- * ========================================================================= */

@@ -2,28 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
- * 文件: perftest_mem_host.c
- * 这是什么 (What):
- *   "主机内存"后端的占位实现. 对应 RDMA perftest src/host_memory.c.
- *   表示完全用 CPU 内存做缓冲区, 行为和当前 register_mem() 主线一致.
- *   这个文件存在的意义是让 perftest_memory_ops 抽象闭环: 即使将来 GPU
- *   后端没编进来, 至少 host 路径能从 ops 走通.
- *
- * 怎么实现 (How, 给内核老兵):
- *   - 你可以把这一层想成"在用户态写一个 platform_driver, 把 memalign /
- *     hugetlbfs / mmap 包成回调", 没有任何特权操作, 不涉及 ioctl.
- *   - alloc_buffer 真正落地的版本会:
- *       if (cfg->use_huge_page) addr = ub_hugemalloc(size, huge_page, NULL);
- *       else                    addr = memalign(alignment, size);
- *       *out_dmabuf_fd = -1;          // 主机内存不需要 dma-buf
- *       *out_dmabuf_offset = 0;
- *   - copy_* 直接 memcpy 即可.
- *
- * 当前阶段:
- *   - 所有函数体都是 TODO 注释 + 一行 fprintf, 让人在 -v 输出里看到调用顺序.
- *   - 假装成功: 返回 0 / NULL / 拷贝零字节 (但 print 会说 "stub: ok").
+ * Legacy stub / test helper: perftest_mem_host.c
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,19 +38,7 @@ static int host_alloc_buffer(perftest_memory_ops_t *self,
                              uint64_t *out_dmabuf_offset)
 {
     (void)self; (void)size; (void)alignment;
-    /*
-     * TODO (真正实现):
-     *   if (cfg->use_huge_page)
-     *       *out_addr = ub_hugemalloc(size, cfg->huge_page, NULL);
-     *   else
-     *       *out_addr = memalign(alignment, size);
-     *   if (!*out_addr) return -1;
-     *   *out_dmabuf_fd = -1;
-     *   *out_dmabuf_offset = 0;
-     *   return 0;
-     *
-     * 当前 stub 只把出参填成"看起来成功", 不真分配, 因为这条路径暂时不会被走.
-     */
+    
     if (out_addr)          *out_addr = NULL;
     if (out_dmabuf_fd)     *out_dmabuf_fd = -1;
     if (out_dmabuf_offset) *out_dmabuf_offset = 0;

@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) Huawei Technologies Co., Ltd. 2024-2026.
 #
-# 文件: Makefile.test
-#
-# 最小化单元测试: 仅依赖 libc + perftest_gpu_alloc.c, 不需要 cmake / urma /
-# 内核头 / CUDA / ROCm. 跑法:
-#
-#   $ make -f Makefile.test
-#   $ ./perftest_gpu_alloc_test
-#
-# 退出码 0 = ALL PASS. ASAN 模式:
-#   $ make -f Makefile.test CFLAGS_EXTRA="-fsanitize=address -fno-omit-frame-pointer"
+# Minimal unit test (libc + dl only):
+#   make -f Makefile.test && ./perftest_gpu_alloc_test
+# Optional GPU diagnostics (off by default in CMake too):
+#   make -f Makefile.test CFLAGS_EXTRA="-DPERFTEST_ENABLE_GPU_DEBUG=1"
 
 CC          ?= gcc
 CFLAGS      ?= -O2 -g -Wall -Wextra -std=c99 -D_GNU_SOURCE
@@ -18,7 +12,8 @@ CFLAGS_EXTRA ?=
 LDFLAGS     ?= -ldl
 
 TEST_BIN := perftest_gpu_alloc_test
-SRCS     := perftest_gpu_alloc.c perftest_cuda_loader.c perftest_gpu_alloc_test.c
+SRCS     := perftest_gpu_alloc.c perftest_cuda_loader.c \
+            perftest_gdrcopy_loader.c perftest_gpu_alloc_test.c
 
 .PHONY: all clean run
 

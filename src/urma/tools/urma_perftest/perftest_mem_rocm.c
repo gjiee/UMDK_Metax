@@ -2,19 +2,8 @@
  * SPDX-License-Identifier: MIT
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
- * 文件: perftest_mem_rocm.c
- * 这是什么 (What):
- *   AMD ROCm + dma-buf 内存后端的占位实现.
- *
- * 怎么实现 (How):
- *   - 用户态: hipInit / hipSetDevice / hipMalloc.
- *   - dma-buf 导出: hsa_amd_portable_export_dmabuf(addr, size, &fd, &offset).
- *   - 之后流程与 cuda 后端完全相同, 走 urma_register_seg_dmabuf.
- *
- * 当前阶段:
- *   - 仅 stub + print, 不引入 hip 头.
+ * Legacy stub / test helper: perftest_mem_rocm.c
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,19 +41,7 @@ static int rocm_alloc_buffer(perftest_memory_ops_t *self,
                              uint64_t *out_dmabuf_offset)
 {
     (void)self; (void)size; (void)alignment;
-    /*
-     * TODO 真实现:
-     *   void *d_ptr;
-     *   hipMalloc(&d_ptr, size);
-     *   if (priv->use_dmabuf) {
-     *       int fd; uint64_t offset;
-     *       hsa_amd_portable_export_dmabuf(d_ptr, size, &fd, &offset);
-     *       *out_dmabuf_fd = fd; *out_dmabuf_offset = offset;
-     *   } else {
-     *       *out_dmabuf_fd = -1; *out_dmabuf_offset = 0;
-     *   }
-     *   *out_addr = d_ptr;
-     */
+    
     if (out_addr)          *out_addr = NULL;
     if (out_dmabuf_fd)     *out_dmabuf_fd = -1;
     if (out_dmabuf_offset) *out_dmabuf_offset = 0;

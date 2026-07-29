@@ -70,18 +70,8 @@ static const perftest_cmd_t g_cmd[] = {
     { "write_bw",          PERFTEST_WRITE_BW },
     { "send_bw",           PERFTEST_SEND_BW },
     { "atomic_bw",         PERFTEST_ATOMIC_BW },
-    /*
-     * 与 read_lat / write_lat 完全一致, 只是 register_mem 时走 GPU 自动
-     * 回退分配链 (GDR -> peermem -> host-proxy -> memalign). 见
-     * perftest_gpu_alloc.[ch] 与 docs/urma_gpu_alloc_fallback.md.
-     */
     { "read_lat_gpu",      PERFTEST_READ_LAT_GPU },
     { "write_lat_gpu",     PERFTEST_WRITE_LAT_GPU },
-    /*
-     * 与 read_bw / write_bw 完全一致, 只是 register_mem 时走 GPU 自动
-     * 回退分配链 (GDR -> peermem -> host-proxy -> memalign). 见
-     * perftest_gpu_alloc.[ch] 与 docs/urma_gpu_alloc_fallback.md.
-     */
     { "read_bw_gpu",       PERFTEST_READ_BW_GPU },
     { "write_bw_gpu",      PERFTEST_WRITE_BW_GPU }
 };
@@ -203,15 +193,15 @@ default: disable.\n");
     (void)printf("  --stdout                    Print logs to console.\n");
     (void)printf("  --aggr_mode                 Set bond device aggregation mode, support: standalone, \
  active_backup, balance, default: disable\n");
-    (void)printf("  --gpu-mode={proxy|peermem|direct}\n");
-    (void)printf("                              Select GPU memory allocation entry for read_lat_gpu /\n");
-    (void)printf("                              write_lat_gpu. Default (flag absent) = memalign.\n");
-    (void)printf("                                proxy   : cuMemAlloc + cuMemAllocHost shadow;\n");
-    (void)printf("                                          URMA registers shadow; D2H/H2D per IO.\n");
-    (void)printf("                                peermem : cuMemAlloc + URMA registers GPU va;\n");
-    (void)printf("                                          requires nvidia_peermem.ko (or amd_peermem).\n");
-    (void)printf("                                direct  : cuMemAlloc + cuMemGetHandleForAddressRange\n");
-    (void)printf("                                          (CUDA Driver >= 12.2, NIC dma-buf support).\n");
+    (void)printf("  --gpu-mode={proxy|proxy_pure|peermem|direct}\n");
+    (void)printf("                              Select GPU memory allocation for *_gpu commands.\n");
+    (void)printf("                              Default (flag absent) = memalign.\n");
+    (void)printf("                                proxy      : host shadow + GPU; write_lat stages\n");
+    (void)printf("                                             D2H/H2D in the timed path.\n");
+    (void)printf("                                proxy_pure : same alloc as proxy; write_lat does\n");
+    (void)printf("                                             NOT stage (NIC-on-shadow only).\n");
+    (void)printf("                                peermem    : cuMemAlloc GPU VA + peermem pin.\n");
+    (void)printf("                                direct     : cuMemAlloc + dma-buf fd export.\n");
 }
 
 static perftest_cmd_type_t parse_command(const char *argv1)
@@ -233,13 +223,13 @@ static void init_cfg_api_type(perftest_config_t *cfg)
     switch (cfg->cmd) {
         case PERFTEST_READ_LAT:
         case PERFTEST_READ_BW:
-        case PERFTEST_READ_LAT_GPU:    /* GPU 变种, api_type 与 READ 完全一致 */
+        case PERFTEST_READ_LAT_GPU:
         case PERFTEST_READ_BW_GPU:
             cfg->api_type = PERFTEST_READ;
             break;
         case PERFTEST_WRITE_LAT:
         case PERFTEST_WRITE_BW:
-        case PERFTEST_WRITE_LAT_GPU:   /* GPU 变种, api_type 与 WRITE 完全一致 */
+        case PERFTEST_WRITE_LAT_GPU:
         case PERFTEST_WRITE_BW_GPU:
             cfg->api_type = PERFTEST_WRITE;
             break;
@@ -988,16 +978,11 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
                 cfg->enable_stdout = true; 
                 break;
             case PERFTEST_OPT_GPU_MODE: {
-                /*
-                 * --gpu-mode={proxy,peermem,direct}.
-                 * 不加 = NONE = memalign. 失败 (拼写错误) 直接 -1.
-                 * perftest_gpu_mode_t 用 int 在 cfg 里存放, 避免在 cfg 头
-                 * include perftest_gpu_alloc.h 形成循环依赖.
-                 */
                 perftest_gpu_mode_t m;
                 if (perftest_gpu_mode_from_string(optarg, &m) != 0) {
                     (void)fprintf(stderr,
-                        "Invalid --gpu-mode=%s (expected: proxy|peermem|direct)\n",
+                        "Invalid --gpu-mode=%s "
+                        "(expected: proxy|proxy_pure|peermem|direct)\n",
                         optarg);
                     return -1;
                 }
