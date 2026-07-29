@@ -3,6 +3,8 @@
 #
 # Minimal unit test (libc + dl only):
 #   make -f Makefile.test && ./perftest_gpu_alloc_test
+# Optional GPU diagnostics (off by default in CMake too):
+#   make -f Makefile.test CFLAGS_EXTRA="-DPERFTEST_ENABLE_GPU_DEBUG=1"
 
 CC          ?= gcc
 CFLAGS      ?= -O2 -g -Wall -Wextra -std=c99 -D_GNU_SOURCE
