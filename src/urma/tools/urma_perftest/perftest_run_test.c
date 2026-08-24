@@ -194,6 +194,70 @@ static int write_lat_store_flag(perftest_gpu_buffer_t *gbuf, void *gpu_post_va,
     return 0;
 }
 
+/*
+ * write_lat server posts the first WRITE as soon as its thread starts.
+ * The client polls the recv last-byte flag first. If the GPU/client side
+ * zeros that flag *after* the host server WRITE has already landed, the
+ * first completion is wiped and both sides spin forever. That only shows
+ * up when the *client* is peermem/GDR (GPU-as-server zeros its own send
+ * buffer, then posts; the inbound reply cannot arrive before the client
+ * has seen the first packet).
+ *
+ * Zero flags here, then barrier, then start the ping-pong threads.
+ */
+static int write_lat_zero_flags(perftest_context_t *ctx, perftest_config_t *cfg)
+{
+    uint32_t i;
+
+    if (ctx == NULL || cfg == NULL) {
+        return -1;
+    }
+
+    for (i = 0; i < cfg->jettys; i++) {
+        perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, i);
+        void *gpu_post_va = (char *)ctx->local_buf[i] + ctx->buf_size + cfg->size - 1;
+        void *gpu_poll_va = (char *)ctx->local_buf[i] + cfg->size - 1;
+        volatile char *post_buf = (volatile char *)gpu_post_va;
+        volatile char *poll_buf = (volatile char *)gpu_poll_va;
+
+        write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
+
+        if (perftest_gpu_is_device_va(gbuf)) {
+            if (perftest_gpu_needs_cpu_flag(gbuf) &&
+                perftest_cuda_set_current_ctx() != 0) {
+                (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", i);
+                return -1;
+            }
+            if (write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
+                write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
+                (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", i);
+                return -1;
+            }
+        } else {
+            *poll_buf = 0;
+            *post_buf = 0;
+        }
+    }
+    return 0;
+}
+
+static int write_lat_ready_sync(const perftest_config_t *cfg)
+{
+    uint32_t i;
+
+    if (cfg == NULL || cfg->comm.sock_fd == NULL) {
+        return -1;
+    }
+
+    for (i = 0; i < cfg->pair_num; i++) {
+        if (sync_time(cfg->comm.sock_fd[i], "write_lat_ready") != 0) {
+            (void)fprintf(stderr, "Failed to sync write_lat_ready, pair:%u\n", i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 /* Local half offset used by init_*_jfs_wr_sg (WRITE src / READ dst). */
 static size_t bw_local_half_off(const perftest_context_t *ctx,
     const perftest_config_t *cfg, uint32_t index)
@@ -523,20 +587,6 @@ static void *run_write_lat_simplex(void *arg)
     volatile char *poll_buf = (char *)gpu_poll_va;
 
     write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
-
-    /* Clear both flags so stale GPU memory cannot look like completion. */
-    if (perftest_gpu_is_device_va(gbuf)) {
-        if (perftest_gpu_needs_cpu_flag(gbuf) &&
-            perftest_cuda_set_current_ctx() != 0) {
-            (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
-            goto free_cr;
-        }
-        if (write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
-            write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
-            (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
-            goto free_cr;
-        }
-    }
 
     if (cfg->time_type.bs.duration == 1) {
         update_duration_state(ctx, cfg);
@@ -1641,14 +1691,6 @@ static void *run_write_lat_duplex(void *arg)
 
     write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
 
-    if (perftest_gpu_is_device_va(gbuf)) {
-        if (write_lat_store_flag(gbuf, gpu_poll_va, poll_buf, 0) != 0 ||
-            write_lat_store_flag(gbuf, gpu_post_va, post_buf, 0) != 0) {
-            (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", id);
-            goto free_cr;
-        }
-    }
-
     if (cfg->time_type.bs.duration == 1) {
         update_duration_state(ctx, cfg);
     }
@@ -1861,6 +1903,20 @@ static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
 #if PERFTEST_ENABLE_GPU_DEBUG
     write_lat_gdr_eye_prepare(ctx, cfg);
 #endif
+
+    /*
+     * Must finish flag init (and any debug zero of the GPU buf) before the
+     * server is allowed to post. Otherwise GPU-as-client write_lat hangs:
+     * host server WRITE lands, client then zeros the recv flag.
+     */
+    if (write_lat_zero_flags(ctx, cfg) != 0) {
+        destroy_jfs_wr(ctx);
+        return -1;
+    }
+    if (write_lat_ready_sync(cfg) != 0) {
+        destroy_jfs_wr(ctx);
+        return -1;
+    }
 
     if (cfg->jetty_mode == PERFTEST_JETTY_SIMPLEX) {
         ret = run_lat_test(ctx, cfg, run_write_lat_simplex);
