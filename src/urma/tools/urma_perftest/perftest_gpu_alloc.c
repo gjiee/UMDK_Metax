@@ -205,7 +205,7 @@ static int try_alloc_gdr(size_t size, size_t alignment,
            out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback");
     return 0;
 }
-
+/*
 static int has_kernel_module(const char *name)
 {
     FILE *fp = fopen("/proc/modules", "r");
@@ -222,7 +222,7 @@ static int has_kernel_module(const char *name)
     fclose(fp);
     return found;
 }
-
+*/
 /* nvidia_p2p_get_pages requires 64KB-aligned length; pad alloc accordingly. */
 #define PERFTEST_GPU_SEG_ALIGN ((size_t)(64u * 1024u))
 static size_t align_up_size(size_t size, size_t align)
@@ -247,12 +247,14 @@ static int try_alloc_peermem(size_t size, size_t alignment,
         GA_LOG("FAIL: libcuda.so.1 not present");
         return -1;
     }
+    /*
     if (!has_kernel_module("nvidia_peermem") &&
         !has_kernel_module("amd_peermem")) {
         GA_LOG("FAIL: no peer-mem kernel module "
                "(modprobe nvidia_peermem or amd_peermem)");
         return -1;
     }
+    */
     if (perftest_cuda_ctx_create(0) != 0) {
         GA_LOG("FAIL: cuCtxCreate");
         return -1;
