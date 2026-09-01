@@ -1044,7 +1044,8 @@ static void init_read_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, perf
     uint32_t i, uint32_t j)
 {
     run_test_ctx_t *run_ctx = &ctx->run_ctx;
-    uint32_t sge_size = cfg->size / cfg->sge_num;
+    uint32_t payload = perftest_wqe_payload(cfg);
+    uint32_t sge_size = payload / cfg->sge_num;
     uint32_t sge_idx;
 
     uint64_t lva = (cfg->seg_pre_jetty == false) ?
@@ -1063,8 +1064,10 @@ static void init_read_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, perf
     // Step increased value
     local_sge[0].addr = lva;  // all sges are configured with the same address and then offset.
     remote_sge[0].addr = rva;
-    // it is only need to calculate sge addr offset when j > 0, for the offset is 0 when j == 0.
-    if (j > 0) {
+    if (cfg->wr_split > 0) {
+        local_sge[0].addr = lva + (uint64_t)j * cfg->wr_split;
+        remote_sge[0].addr = rva + (uint64_t)j * cfg->wr_split;
+    } else if (j > 0) {
         uint32_t l_idx = (i * cfg->jfs_post_list + j - 1) * PERFTEST_SGE_NUM_PRE_WR * cfg->sge_num + cfg->sge_num;
         uint32_t r_idx = (i * cfg->jfs_post_list + j - 1) * PERFTEST_SGE_NUM_PRE_WR * cfg->sge_num;
         local_sge[0].addr = run_ctx->jfs_sge[l_idx].addr;
@@ -1098,7 +1101,8 @@ static void init_write_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, per
     uint32_t i, uint32_t j)
 {
     run_test_ctx_t *run_ctx = &ctx->run_ctx;
-    uint32_t sge_size = cfg->size / cfg->sge_num;
+    uint32_t payload = perftest_wqe_payload(cfg);
+    uint32_t sge_size = payload / cfg->sge_num;
     uint32_t sge_idx;
 
     uint64_t lva = (cfg->seg_pre_jetty == false) ?
@@ -1116,9 +1120,10 @@ static void init_write_jfs_wr_sg(urma_jfs_wr_t *wr, perftest_context_t *ctx, per
     // Step increased value
     local_sge[0].addr = lva;   // all sges are configured with the same address and then offset.
     remote_sge[0].addr = rva;  // all sges are configured with the same address and then offset.
-    // it is only need to calculate sge addr offset when j > 0, for the offset is 0 when j == 0.
-    // the following remote_sge addr judgement is the same.
-    if (j > 0) {
+    if (cfg->wr_split > 0) {
+        local_sge[0].addr = lva + (uint64_t)j * cfg->wr_split;
+        remote_sge[0].addr = rva + (uint64_t)j * cfg->wr_split;
+    } else if (j > 0) {
         uint32_t l_idx = (i * cfg->jfs_post_list + j - 1) * PERFTEST_SGE_NUM_PRE_WR * cfg->sge_num + cfg->sge_num;
         uint32_t r_idx = (i * cfg->jfs_post_list + j - 1) * PERFTEST_SGE_NUM_PRE_WR * cfg->sge_num;
         local_sge[0].addr = run_ctx->jfs_sge[l_idx].addr;
@@ -3038,7 +3043,7 @@ static void print_bw_report(perftest_context_t *ctx, perftest_config_t *cfg,
     }
     inf_bi_factor = (cfg->bidirection && cfg->time_type.bs.infinite == 1) ?
         (cfg->api_type == PERFTEST_SEND ? INF_BI_FACTOR_SEND : INF_BI_FACTOR_OTHER) : NON_INF_BI_FACTOR;
-    size = inf_bi_factor * cfg->size;
+    size = inf_bi_factor * perftest_wqe_payload(cfg);
     uint64_t iters_sum = (cfg->time_type.bs.iterations == 1) ? num_of_cal_iters * cfg->jettys : num_of_cal_iters;
     /* Exception iters equals last_iters, causing iters_sum to be 0 */
     uint64_t run_ctx_iters_sum = iters_sum == 0 ? 0 : iters_sum - 1;
@@ -3051,7 +3056,7 @@ static void print_bw_report(perftest_context_t *ctx, perftest_config_t *cfg,
     peak_down = opt_delta * PERFTEST_MBS;
 
     if (local_bw_report != NULL) {
-        local_bw_report->size = cfg->size;
+        local_bw_report->size = perftest_wqe_payload(cfg);
         local_bw_report->iters = iters_sum;
         local_bw_report->bw_peak = (double)peak_up / peak_down;
         local_bw_report->bw_avg = bw_avg;
@@ -3062,7 +3067,8 @@ static void print_bw_report(perftest_context_t *ctx, perftest_config_t *cfg,
     if ((!cfg->bidirection) || ((cfg->api_type == PERFTEST_SEND || cfg->enable_imm == true) &&
         cfg->time_type.bs.duration == 1) || cfg->time_type.bs.infinite == 1) {
         // " %-7u    %-10lu       %-7.3lf            %-7.3lf         %-7.6lf"
-        (void)printf(REPORT_BW_FMT, cfg->size, iters_sum, (double)peak_up / peak_down, bw_avg, msg_rate_avg);
+        (void)printf(REPORT_BW_FMT, perftest_wqe_payload(cfg), iters_sum, (double)peak_up / peak_down, bw_avg,
+            msg_rate_avg);
         (void)printf("\n");
     }
 }

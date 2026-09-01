@@ -168,6 +168,8 @@ default: disable.\n");
     (void)printf("  --retry_num  <num>          Set retry num for user_tp, default: 7.\n");
     (void)printf("  --ack_timeout <num>         Set ack timeout for user_tp, default: 15.\n");
     (void)printf("  --sge_num <num>             Set sge_num for wr, default: 1.\n");
+    (void)printf("  --wr_split <bytes>          Split -s into consecutive WRITE/READ WQEs of <bytes>\n");
+    (void)printf("                              (not --sge_num). -s must be a multiple of <bytes>.\n");
     (void)printf("  --enable_write_dirty <time> Enable write dirty and set the period of write dirty, \
 default: disable.\n");
     (void)printf("  --pair_num <num>            Enable multiplayer model and set the number of connection, \
@@ -382,6 +384,7 @@ static void init_cfg(perftest_config_t *cfg)
     cfg->retry_num = PERFTEST_DEF_RETRY_NUM;
     cfg->ack_timeout = PERFTEST_DEF_ACK_TIMEOUT;
     cfg->sge_num = 1;
+    cfg->wr_split = 0;
     cfg->pair_num = 1;
 
     cfg->enable_write_dirty = false;
@@ -438,6 +441,10 @@ void print_cfg(const perftest_config_t *cfg)
     }
     if (cfg->jfs_post_list > 1) {
         (void)printf(" JFS post list       : %u\n", cfg->jfs_post_list);
+    }
+    if (cfg->wr_split > 0) {
+        (void)printf(" WR split            : %u B x %u WQEs (alloc -s %u)\n",
+            cfg->wr_split, cfg->jfs_post_list, cfg->size);
     }
     if (cfg->jfr_post_list > 1) {
         (void)printf(" JFR post list       : %u\n", cfg->jfr_post_list);
@@ -603,6 +610,7 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
         {"retry_num",     required_argument, NULL, PERFTEST_OPT_RETRY_NUM},
         {"ack_timeout",   required_argument, NULL, PERFTEST_OPT_ACK_TIMEOUT},
         {"sge_num",       required_argument, NULL, PERFTEST_OPT_SGE_NUM},
+        {"wr_split",      required_argument, NULL, PERFTEST_OPT_WR_SPLIT},
         {"enable_write_dirty", required_argument, NULL, PERFTEST_OPT_WRITE_DIRTY},
         {"pair_num",      required_argument, NULL, PERFTEST_OPT_PAIR_NUM},
         {"async_import",  no_argument,       NULL, PERFTEST_OPT_ASYNC_CONNECT},
@@ -886,6 +894,9 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
                 break;
             case PERFTEST_OPT_SGE_NUM:
                 (void)ub_str_to_u32(optarg, &cfg->sge_num);
+                break;
+            case PERFTEST_OPT_WR_SPLIT:
+                (void)ub_str_to_u32(optarg, &cfg->wr_split);
                 break;
             case PERFTEST_OPT_WRITE_DIRTY:
                 cfg->enable_write_dirty = true;
@@ -1187,6 +1198,49 @@ int check_local_cfg(perftest_config_t *cfg)
     if (cfg->api_type == PERFTEST_ATOMIC && cfg->size != PERFTEST_DEF_ATOMIC_SIZE) {
         (void)fprintf(stderr, "Message size should not be changed for Atomic tests.\n");
         exit(1);
+    }
+    if (cfg->wr_split > 0) {
+        uint32_t nfrag;
+
+        if (cfg->api_type != PERFTEST_WRITE && cfg->api_type != PERFTEST_READ) {
+            (void)fprintf(stderr, "--wr_split only supports write_bw/read_bw (and *_gpu).\n");
+            exit(1);
+        }
+        if (cfg->type != PERFTEST_BW) {
+            (void)fprintf(stderr, "--wr_split is a BW diagnostic; do not use on LAT.\n");
+            exit(1);
+        }
+        if (cfg->all == true) {
+            (void)fprintf(stderr, "--wr_split cannot be combined with --all.\n");
+            exit(1);
+        }
+        if (cfg->sge_num != 1) {
+            (void)fprintf(stderr, "--wr_split requires --sge_num 1 (do not combine with SGE split).\n");
+            exit(1);
+        }
+        if (cfg->wr_split < 64 || cfg->size <= cfg->wr_split) {
+            (void)fprintf(stderr, "--wr_split %u must be >= 64 and < -s %u.\n",
+                cfg->wr_split, cfg->size);
+            exit(1);
+        }
+        if ((cfg->size % cfg->wr_split) != 0) {
+            (void)fprintf(stderr, "-s %u must be a multiple of --wr_split %u.\n",
+                cfg->size, cfg->wr_split);
+            exit(1);
+        }
+        nfrag = cfg->size / cfg->wr_split;
+        if (cfg->jfs_post_list != 1 && cfg->jfs_post_list != nfrag) {
+            (void)fprintf(stderr, "--wr_split conflicts with -l %u (need %u).\n",
+                cfg->jfs_post_list, nfrag);
+            exit(1);
+        }
+        cfg->jfs_post_list = nfrag;
+        if (cfg->cq_mod > nfrag) {
+            cfg->cq_mod = nfrag;
+            (void)printf("wr_split: CQ moderation set to %u\n", nfrag);
+        }
+        (void)printf("wr_split: -s %u posted as %u WQEs of %u (consecutive offsets)\n",
+            cfg->size, nfrag, cfg->wr_split);
     }
     if (cfg->jfs_post_list == 0 || cfg->jfr_post_list == 0) {
         (void)fprintf(stderr, "Invalid parameter with jfs_post_list: %u, jfr_post_list: %u.\n",
