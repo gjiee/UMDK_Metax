@@ -215,6 +215,8 @@ enum perftest_opts {
      *   docs/urma_gpu_mode_cli.md.
      */
     PERFTEST_OPT_GPU_MODE,
+    /* Split -s into consecutive WQEs of this payload (write/read BW). */
+    PERFTEST_OPT_WR_SPLIT,
 };
 
 typedef enum perftest_rate_limiter_units {
@@ -311,6 +313,8 @@ typedef struct perftest_config {
     uint32_t ack_timeout;
 
     uint32_t sge_num;
+    /* 0 = one WQE of cfg->size. >0 = post (size/wr_split) WQEs of wr_split. */
+    uint32_t wr_split;
 
     bool enable_write_dirty;
     uint32_t write_dirty_period;
@@ -371,6 +375,12 @@ static inline bool perftest_check_rs_mode(const perftest_config_t *cfg)
 {
     return cfg->trans_mode == URMA_TM_RC && (cfg->order_type & URMA_OT);
 };
+
+/* Bytes actually posted in each send WQE (cfg->size unless --wr_split). */
+static inline uint32_t perftest_wqe_payload(const perftest_config_t *cfg)
+{
+    return (cfg->wr_split > 0) ? cfg->wr_split : cfg->size;
+}
 
 void print_cfg(const perftest_config_t *cfg);
 int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg);
