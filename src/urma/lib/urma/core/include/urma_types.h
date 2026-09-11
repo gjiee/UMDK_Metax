@@ -996,7 +996,7 @@ typedef struct urma_seg_cfg {
     urma_reg_seg_flag_t flag;
     uint64_t user_ctx;
     uint64_t iova; /* user iova, maybe zero-based-address */
-    uint32_t is_gpu_seg; //for GDR test
+    uint32_t is_gpu_seg; /* 1 = GPU VA; kernel pins via vendor P2P, not pin_user_pages */
     /*
      * GDR ABI 扩展位置 (comment only, 当前未真正添加):
      *

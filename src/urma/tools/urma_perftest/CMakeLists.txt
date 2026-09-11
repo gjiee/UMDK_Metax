@@ -19,6 +19,7 @@ add_executable(urma_perftest
     perftest_mem_gpu_proxy.c
     perftest_gpu_alloc.c
     perftest_cuda_loader.c
+    perftest_metax_loader.c
     perftest_gdrcopy_loader.c
     perftest_validation.c
 )

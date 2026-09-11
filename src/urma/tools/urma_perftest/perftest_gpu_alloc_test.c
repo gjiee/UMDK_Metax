@@ -126,6 +126,17 @@ int main(int argc, char **argv)
              PERFTEST_GPU_ALLOC_MEMALIGN);
 
     /*
+     * mode=METAX without MACA runtime -> memalign.
+     */
+    perftest_gpu_set_mode(PERFTEST_GPU_MODE_METAX);
+    run_case("mode=METAX (no libmcruntime) -> memalign fallback",
+             0,
+             PERFTEST_GPU_ALLOC_MEMALIGN);
+    run_case("mode=METAX + force METAX fail -> memalign",
+             1u << PERFTEST_GPU_ALLOC_METAX,
+             PERFTEST_GPU_ALLOC_MEMALIGN);
+
+    /*
      * 字符串解析 sanity check.
      */
     {
@@ -138,6 +149,14 @@ int main(int argc, char **argv)
                m == PERFTEST_GPU_MODE_PEERMEM, "from_string peermem");
         EXPECT(perftest_gpu_mode_from_string("direct",  &m) == 0 &&
                m == PERFTEST_GPU_MODE_DIRECT, "from_string direct");
+        EXPECT(perftest_gpu_mode_from_string("metax",   &m) == 0 &&
+               m == PERFTEST_GPU_MODE_METAX, "from_string metax");
+        EXPECT(perftest_gpu_mode_from_string("muxi",    &m) == 0 &&
+               m == PERFTEST_GPU_MODE_METAX, "from_string muxi");
+        EXPECT(perftest_gpu_mode_from_string("mx",      &m) == 0 &&
+               m == PERFTEST_GPU_MODE_METAX, "from_string mx");
+        EXPECT(perftest_gpu_mode_from_string("maca",    &m) == 0 &&
+               m == PERFTEST_GPU_MODE_METAX, "from_string maca");
         EXPECT(perftest_gpu_mode_from_string("none",    &m) == 0 &&
                m == PERFTEST_GPU_MODE_NONE, "from_string none");
         EXPECT(perftest_gpu_mode_from_string("bogus",   &m) != 0,

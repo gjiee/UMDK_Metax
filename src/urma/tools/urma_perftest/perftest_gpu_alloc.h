@@ -3,7 +3,7 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
  * GPU buffer alloc for *_gpu perftest commands, selected by --gpu-mode:
- *   none | proxy | proxy_pure | peermem | direct(dma-buf), with memalign fallback.
+ *   none | proxy | proxy_pure | peermem | direct(dma-buf) | metax, with memalign fallback.
  *
  * proxy      : host shadow + GPU; BW/LAT timed path includes staging
  *              (WRITE D2H before post, READ H2D after CQE, LAT both).
@@ -27,6 +27,7 @@ typedef enum perftest_gpu_mode {
     PERFTEST_GPU_MODE_PEERMEM    = 2,
     PERFTEST_GPU_MODE_DIRECT     = 3,
     PERFTEST_GPU_MODE_PROXY_PURE = 4,
+    PERFTEST_GPU_MODE_METAX      = 5, /* Muxi MACA mcMalloc + kernel gpu_vendor=metax */
 } perftest_gpu_mode_t;
 
 typedef enum perftest_gpu_alloc_strategy {
@@ -35,6 +36,7 @@ typedef enum perftest_gpu_alloc_strategy {
     PERFTEST_GPU_ALLOC_PEERMEM    = 2,
     PERFTEST_GPU_ALLOC_HOST_PROXY = 3,
     PERFTEST_GPU_ALLOC_MEMALIGN   = 4,
+    PERFTEST_GPU_ALLOC_METAX      = 5,
 } perftest_gpu_alloc_strategy_t;
 
 typedef struct perftest_gpu_buffer {
@@ -56,6 +58,8 @@ int  perftest_gpu_alloc_buffer(size_t size, size_t alignment,
 void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf);
 
 void                perftest_gpu_set_mode(perftest_gpu_mode_t m);
+void                perftest_gpu_set_device_id(int dev_id);
+int                 perftest_gpu_get_device_id(void);
 perftest_gpu_mode_t perftest_gpu_get_mode(void);
 const char         *perftest_gpu_mode_name(perftest_gpu_mode_t m);
 int                 perftest_gpu_mode_from_string(const char *s,

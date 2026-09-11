@@ -13,7 +13,8 @@ LDFLAGS     ?= -ldl
 
 TEST_BIN := perftest_gpu_alloc_test
 SRCS     := perftest_gpu_alloc.c perftest_cuda_loader.c \
-            perftest_gdrcopy_loader.c perftest_gpu_alloc_test.c
+            perftest_metax_loader.c perftest_gdrcopy_loader.c \
+            perftest_gpu_alloc_test.c
 
 .PHONY: all clean run
 

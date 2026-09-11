@@ -19,6 +19,7 @@
 
 #include "perftest_cuda_loader.h"
 #include "perftest_gdrcopy_loader.h"
+#include "perftest_metax_loader.h"
 #include "perftest_gpu_alloc.h"
 
 #define GA_LOG(fmt, ...) \
@@ -90,11 +91,23 @@ static int setup_cpu_flag_access(perftest_gpu_buffer_t *out)
 }
 
 static perftest_gpu_mode_t g_gpu_mode = PERFTEST_GPU_MODE_NONE;
+static int g_gpu_dev_id;
 
 void perftest_gpu_set_mode(perftest_gpu_mode_t m)
 {
     g_gpu_mode = m;
     GA_LOG("mode = %s", perftest_gpu_mode_name(m));
+}
+
+void perftest_gpu_set_device_id(int dev_id)
+{
+    g_gpu_dev_id = (dev_id < 0) ? 0 : dev_id;
+    GA_LOG("device_id = %d", g_gpu_dev_id);
+}
+
+int perftest_gpu_get_device_id(void)
+{
+    return g_gpu_dev_id;
 }
 
 perftest_gpu_mode_t perftest_gpu_get_mode(void)
@@ -110,6 +123,7 @@ const char *perftest_gpu_mode_name(perftest_gpu_mode_t m)
         case PERFTEST_GPU_MODE_PROXY_PURE: return "proxy_pure";
         case PERFTEST_GPU_MODE_PEERMEM:    return "peermem";
         case PERFTEST_GPU_MODE_DIRECT:     return "direct";
+        case PERFTEST_GPU_MODE_METAX:      return "metax";
         default:                            return "?";
     }
 }
@@ -122,6 +136,11 @@ int perftest_gpu_mode_from_string(const char *s, perftest_gpu_mode_t *out)
     if (strcmp(s, "proxy_pure") == 0) { *out = PERFTEST_GPU_MODE_PROXY_PURE; return 0; }
     if (strcmp(s, "peermem")    == 0) { *out = PERFTEST_GPU_MODE_PEERMEM;    return 0; }
     if (strcmp(s, "direct")     == 0) { *out = PERFTEST_GPU_MODE_DIRECT;     return 0; }
+    if (strcmp(s, "metax")      == 0 || strcmp(s, "muxi") == 0 ||
+        strcmp(s, "mx")         == 0 || strcmp(s, "maca") == 0) {
+        *out = PERFTEST_GPU_MODE_METAX;
+        return 0;
+    }
     return -1;
 }
 
@@ -149,6 +168,7 @@ const char *perftest_gpu_alloc_strategy_name(perftest_gpu_alloc_strategy_t s)
         case PERFTEST_GPU_ALLOC_PEERMEM:    return "PEERMEM";
         case PERFTEST_GPU_ALLOC_HOST_PROXY: return "HOST_PROXY";
         case PERFTEST_GPU_ALLOC_MEMALIGN:   return "MEMALIGN";
+        case PERFTEST_GPU_ALLOC_METAX:      return "METAX";
         case PERFTEST_GPU_ALLOC_NONE:
         default:                            return "NONE";
     }
@@ -288,6 +308,53 @@ static int try_alloc_peermem(size_t size, size_t alignment,
     return 0;
 }
 
+/* Kernel MetaX acquire_mem aligns to PAGE_SIZE, not NVIDIA 64KB. */
+#define PERFTEST_METAX_SEG_ALIGN ((size_t)4096u)
+
+/* --gpu-mode=metax: MACA mcMalloc GPU VA; kernel pins via gpu_vendor=metax. */
+static int try_alloc_metax(size_t size, size_t alignment,
+                           perftest_gpu_buffer_t *out)
+{
+    void *dptr = NULL;
+    size_t alloc_size = align_up_size(size, PERFTEST_METAX_SEG_ALIGN);
+
+    (void)alignment;
+
+    if (forced_fail(PERFTEST_GPU_ALLOC_METAX)) {
+        GA_LOG("forced fail by test mask");
+        return -1;
+    }
+    if (perftest_metax_loader_init() != 0) {
+        GA_LOG("FAIL: libmcruntime not present");
+        return -1;
+    }
+    if (perftest_metax_set_device(g_gpu_dev_id) != 0) {
+        GA_LOG("FAIL: mcSetDevice(%d)", g_gpu_dev_id);
+        return -1;
+    }
+    if (perftest_metax_mem_alloc(alloc_size, &dptr) != 0) {
+        GA_LOG("FAIL: mcMalloc");
+        return -1;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->addr = dptr;
+    out->gpu_ptr = dptr;
+    out->size = alloc_size;
+    out->dmabuf_fd = -1;
+    out->strategy = PERFTEST_GPU_ALLOC_METAX;
+    if (setup_cpu_flag_access(out) != 0) {
+        (void)perftest_metax_mem_free(dptr);
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
+
+    GA_LOG("OK: dptr=%p req=%zu alloc=%zu device=%d bar=%s",
+           dptr, size, alloc_size, g_gpu_dev_id,
+           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback");
+    return 0;
+}
+
 /* --gpu-mode=proxy: GPU device buf + host shadow for URMA register. */
 static int try_alloc_host_proxy(size_t size, size_t alignment,
                                 perftest_gpu_buffer_t *out)
@@ -406,6 +473,14 @@ int perftest_gpu_alloc_buffer(size_t size, size_t alignment,
             }
             GA_LOG("mode=peermem failed, fallback to memalign");
             break;
+        case PERFTEST_GPU_MODE_METAX:
+            if (try_alloc_metax(size, alignment, out) == 0) {
+                GA_LOG("DONE via %s",
+                       perftest_gpu_alloc_strategy_name(out->strategy));
+                return 0;
+            }
+            GA_LOG("mode=metax failed, fallback to memalign");
+            break;
         case PERFTEST_GPU_MODE_PROXY:
         case PERFTEST_GPU_MODE_PROXY_PURE:
             if (try_alloc_host_proxy(size, alignment, out) == 0) {
@@ -521,7 +596,8 @@ bool perftest_gpu_is_device_va(const perftest_gpu_buffer_t *buf)
         return false;
     }
     return buf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
-           buf->strategy == PERFTEST_GPU_ALLOC_GDR;
+           buf->strategy == PERFTEST_GPU_ALLOC_GDR ||
+           buf->strategy == PERFTEST_GPU_ALLOC_METAX;
 }
 
 bool perftest_gpu_has_bar_map(const perftest_gpu_buffer_t *buf)
@@ -552,7 +628,30 @@ bool perftest_gpu_needs_cpu_flag(const perftest_gpu_buffer_t *buf)
         return false;
     }
     return buf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
-           buf->strategy == PERFTEST_GPU_ALLOC_GDR;
+           buf->strategy == PERFTEST_GPU_ALLOC_GDR ||
+           buf->strategy == PERFTEST_GPU_ALLOC_METAX;
+}
+
+static int gpu_memcpy_d2h(void *host, void *dev, size_t n)
+{
+    if (perftest_metax_is_loaded()) {
+        return perftest_metax_memcpy_d2h(host, dev, n);
+    }
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_d2h(host, dev, n);
+    }
+    return -1;
+}
+
+static int gpu_memcpy_h2d(void *dev, const void *host, size_t n)
+{
+    if (perftest_metax_is_loaded()) {
+        return perftest_metax_memcpy_h2d(dev, host, n);
+    }
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_h2d(dev, host, n);
+    }
+    return -1;
 }
 
 int perftest_gpu_flag_load(perftest_gpu_buffer_t *buf, void *gpu_flag_va, char *out)
@@ -560,7 +659,7 @@ int perftest_gpu_flag_load(perftest_gpu_buffer_t *buf, void *gpu_flag_va, char *
     if (!perftest_gpu_needs_cpu_flag(buf) || gpu_flag_va == NULL || out == NULL) {
         return -1;
     }
-    if (perftest_cuda_memcpy_d2h(buf->cpu_flag, gpu_flag_va, 1) != 0) {
+    if (gpu_memcpy_d2h(buf->cpu_flag, gpu_flag_va, 1) != 0) {
         return -1;
     }
     *out = *(volatile char *)buf->cpu_flag;
@@ -573,7 +672,7 @@ int perftest_gpu_flag_store(perftest_gpu_buffer_t *buf, void *gpu_flag_va, char 
         return -1;
     }
     *(volatile char *)buf->cpu_flag = val;
-    return perftest_cuda_memcpy_h2d(gpu_flag_va, buf->cpu_flag, 1);
+    return gpu_memcpy_h2d(gpu_flag_va, buf->cpu_flag, 1);
 }
 
 void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
@@ -605,6 +704,9 @@ void perftest_gpu_free_buffer(perftest_gpu_buffer_t *buf)
             if (perftest_cuda_is_loaded()) {
                 perftest_cuda_mem_free(buf->gpu_ptr);
             }
+            break;
+        case PERFTEST_GPU_ALLOC_METAX:
+            (void)perftest_metax_mem_free(buf->gpu_ptr);
             break;
         case PERFTEST_GPU_ALLOC_HOST_PROXY:
             if (perftest_cuda_is_loaded()) {

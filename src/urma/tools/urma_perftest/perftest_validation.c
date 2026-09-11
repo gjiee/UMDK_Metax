@@ -16,7 +16,30 @@
 #include <string.h>
 
 #include "perftest_cuda_loader.h"
+#include "perftest_metax_loader.h"
 #include "perftest_validation.h"
+
+static int validation_memcpy_h2d(void *dev, const void *host, size_t n)
+{
+    if (perftest_metax_is_loaded()) {
+        return perftest_metax_memcpy_h2d(dev, host, n);
+    }
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_h2d(dev, host, n);
+    }
+    return -1;
+}
+
+static int validation_memcpy_d2h(void *host, void *dev, size_t n)
+{
+    if (perftest_metax_is_loaded()) {
+        return perftest_metax_memcpy_d2h(host, dev, n);
+    }
+    if (perftest_cuda_is_loaded()) {
+        return perftest_cuda_memcpy_d2h(host, dev, n);
+    }
+    return -1;
+}
 
 #define V_LOG(fmt, ...) \
     fprintf(stderr, "[validation] %s: " fmt "\n", __func__, ##__VA_ARGS__)
@@ -83,8 +106,8 @@ int perftest_validation_fill_gpu(void *dptr, size_t size, uint32_t seed)
     uint8_t *tmp;
     int      rc;
 
-    if (!perftest_cuda_is_loaded()) {
-        V_LOG("FAIL: cuda loader not initialised");
+    if (!perftest_metax_is_loaded() && !perftest_cuda_is_loaded()) {
+        V_LOG("FAIL: no MetaX/CUDA loader initialised");
         return -1;
     }
     if (dptr == NULL || size == 0) {
@@ -92,7 +115,7 @@ int perftest_validation_fill_gpu(void *dptr, size_t size, uint32_t seed)
         return -1;
     }
     /* peermem 热路径外: H2D 前必须 current CUcontext. */
-    if (perftest_cuda_set_current_ctx() != 0) {
+    if (perftest_cuda_is_loaded() && perftest_cuda_set_current_ctx() != 0) {
         V_LOG("FAIL: cuCtxSetCurrent");
         return -1;
     }
@@ -102,10 +125,10 @@ int perftest_validation_fill_gpu(void *dptr, size_t size, uint32_t seed)
         return -1;
     }
     perftest_validation_fill_host(tmp, size, seed);
-    rc = perftest_cuda_memcpy_h2d(dptr, tmp, size);
+    rc = validation_memcpy_h2d(dptr, tmp, size);
     free(tmp);
     if (rc != 0) {
-        V_LOG("FAIL: cuMemcpyHtoD rc=%d", rc);
+        V_LOG("FAIL: memcpy H2D rc=%d", rc);
         return -1;
     }
     V_LOG("ok: H2D dptr=%p size=%zu seed=0x%x", dptr, size, seed);
@@ -118,15 +141,15 @@ long perftest_validation_check_gpu(void *dptr, size_t size, uint32_t seed)
     size_t   bad;
     int      rc;
 
-    if (!perftest_cuda_is_loaded()) {
-        V_LOG("FAIL: cuda loader not initialised");
+    if (!perftest_metax_is_loaded() && !perftest_cuda_is_loaded()) {
+        V_LOG("FAIL: no MetaX/CUDA loader initialised");
         return -1;
     }
     if (dptr == NULL || size == 0) {
         V_LOG("invalid arg dptr=%p size=%zu", dptr, size);
         return -1;
     }
-    if (perftest_cuda_set_current_ctx() != 0) {
+    if (perftest_cuda_is_loaded() && perftest_cuda_set_current_ctx() != 0) {
         V_LOG("FAIL: cuCtxSetCurrent");
         return -1;
     }
@@ -135,10 +158,10 @@ long perftest_validation_check_gpu(void *dptr, size_t size, uint32_t seed)
         V_LOG("ENOMEM tmp=%zu", size);
         return -1;
     }
-    rc = perftest_cuda_memcpy_d2h(tmp, dptr, size);
+    rc = validation_memcpy_d2h(tmp, dptr, size);
     if (rc != 0) {
         free(tmp);
-        V_LOG("FAIL: cuMemcpyDtoH rc=%d", rc);
+        V_LOG("FAIL: memcpy D2H rc=%d", rc);
         return -1;
     }
     bad = perftest_validation_check_host(tmp, size, seed);
@@ -224,11 +247,11 @@ int perftest_gdr_eye_init_gpu_recv(void *recv_dptr, uint32_t size)
     if (recv_dptr == NULL || size == 0) {
         return -1;
     }
-    if (!perftest_cuda_is_loaded()) {
-        V_LOG("FAIL: cuda loader not initialised");
+    if (!perftest_metax_is_loaded() && !perftest_cuda_is_loaded()) {
+        V_LOG("FAIL: no MetaX/CUDA loader initialised");
         return -1;
     }
-    if (perftest_cuda_set_current_ctx() != 0) {
+    if (perftest_cuda_is_loaded() && perftest_cuda_set_current_ctx() != 0) {
         return -1;
     }
     tmp = (char *)calloc(1, size);
@@ -242,7 +265,7 @@ int perftest_gdr_eye_init_gpu_recv(void *recv_dptr, uint32_t size)
     if (copy_len > 0) {
         memcpy(tmp, PERFTEST_GDR_EYE_INIT_MARK, copy_len);
     }
-    rc = perftest_cuda_memcpy_h2d(recv_dptr, tmp, size);
+    rc = validation_memcpy_h2d(recv_dptr, tmp, size);
     free(tmp);
     if (rc != 0) {
         V_LOG("FAIL: H2D init mark rc=%d", rc);
@@ -264,11 +287,11 @@ int perftest_gdr_eye_dump_gpu_recv(void *recv_dptr, uint32_t size)
     if (recv_dptr == NULL || size == 0) {
         return -1;
     }
-    if (!perftest_cuda_is_loaded()) {
-        V_LOG("FAIL: cuda loader not initialised");
+    if (!perftest_metax_is_loaded() && !perftest_cuda_is_loaded()) {
+        V_LOG("FAIL: no MetaX/CUDA loader initialised");
         return -1;
     }
-    if (perftest_cuda_set_current_ctx() != 0) {
+    if (perftest_cuda_is_loaded() && perftest_cuda_set_current_ctx() != 0) {
         return -1;
     }
     /* 打印 payload 前缀, 不含最后 flag 字节; 至少打到 magic 长度. */
@@ -280,7 +303,7 @@ int perftest_gdr_eye_dump_gpu_recv(void *recv_dptr, uint32_t size)
     if (tmp == NULL) {
         return -1;
     }
-    rc = perftest_cuda_memcpy_d2h(tmp, recv_dptr, dump_len);
+    rc = validation_memcpy_d2h(tmp, recv_dptr, dump_len);
     if (rc != 0) {
         free(tmp);
         V_LOG("FAIL: D2H dump rc=%d", rc);
