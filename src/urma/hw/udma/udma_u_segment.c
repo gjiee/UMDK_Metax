@@ -109,11 +109,11 @@ static int udma_exec_register_seg_cmd(urma_context_t *urma_ctx,
 	if (!to_udma_u_ctx(urma_ctx)->sva_sep_mode_en && seg_cfg->flag.bs.non_pin)
 		return 0;
 
-	if (seg_cfg->is_gpu_seg)
+	if (seg_cfg->is_gpu_seg) {
 		ucmd.is_gpu_seg = 1;
-	/* Always send ucmd so the kernel sees an explicit 0/1, not missing udata. */
-	udata.in_addr = (uint64_t)(uintptr_t)&ucmd;
-	udata.in_len = (uint32_t)sizeof(ucmd);
+		udata.in_addr = (uint64_t)(uintptr_t)&ucmd;
+		udata.in_len = (uint32_t)sizeof(ucmd);
+	}
 
 	ret = urma_cmd_register_seg(urma_ctx, urma_tseg, seg_cfg, &udata);
 	if (ret)
