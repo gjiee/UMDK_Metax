@@ -15,11 +15,29 @@
 extern "C" {
 #endif
 
+/*
+ * Must match urma_gpu_vendor_t. Kept local so Makefile.test can build
+ * without linking liburma.
+ */
+typedef enum perftest_gpu_vendor {
+    PERFTEST_GPU_VENDOR_NONE   = 0,
+    PERFTEST_GPU_VENDOR_NVIDIA = 1,
+    PERFTEST_GPU_VENDOR_MUXI   = 2
+} perftest_gpu_vendor_t;
+
 int perftest_cuda_set_current_ctx(void);
 
 int  perftest_cuda_loader_init(void);
 void perftest_cuda_loader_fini(void);
 int  perftest_cuda_is_loaded(void);
+
+/* Hint before init: NONE = auto-detect. */
+void perftest_cuda_set_vendor_hint(perftest_gpu_vendor_t vendor);
+perftest_gpu_vendor_t perftest_cuda_get_vendor(void);
+const char *perftest_cuda_vendor_name(perftest_gpu_vendor_t vendor);
+
+/* NVIDIA peermem needs SYNC_MEMOPS; Muxi/MACA does not. */
+int perftest_cuda_needs_sync_memops(void);
 
 int  perftest_cuda_ctx_create(int dev_id);
 void perftest_cuda_ctx_destroy(void);
@@ -30,7 +48,7 @@ int  perftest_cuda_mem_free(void *dptr);
 int  perftest_cuda_mem_alloc_host(size_t size, void **out_hptr);
 int  perftest_cuda_mem_free_host(void *hptr);
 
-/* Required before nvidia_p2p_get_pages (SYNC_MEMOPS). */
+/* Required before nvidia_p2p_get_pages (SYNC_MEMOPS). No-op on Muxi. */
 int  perftest_cuda_set_sync_memops(void *dptr);
 
 int  perftest_cuda_memcpy_d2h(void *host, void *dev, size_t n);

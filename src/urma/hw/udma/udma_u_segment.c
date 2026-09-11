@@ -8,15 +8,24 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 #include <ummu_api.h>
+#include "urma_api.h"
 #include "udma_u_buf.h"
 #include "udma_u_common.h"
 #include "udma_u_segment.h"
 
+/*
+ * Kernel ABI (udata of URMA_CMD_REGISTER_SEG):
+ *   is_gpu_seg  : 0 = host pages (pin_user_pages), 1 = GPU VA
+ *   gpu_vendor  : urma_gpu_vendor_t. 0 = unspecified; kernels that only
+ *                 understood NVIDIA treat 0+is_gpu_seg as nvidia_p2p.
+ *                 1 = NVIDIA, 2 = Muxi/MetaX (沐曦).
+ */
 struct udma_register_seg_ucmd {
 	uint32_t is_gpu_seg;
-	uint32_t reserved;
+	uint32_t gpu_vendor;
 };
 
 static void udma_u_init_seg_cfg(urma_context_t *urma_ctx, urma_seg_cfg_t *seg_cfg,
@@ -33,6 +42,7 @@ static void udma_u_init_seg_cfg(urma_context_t *urma_ctx, urma_seg_cfg_t *seg_cf
 	seg->len = seg_cfg->len;
 	seg->va = seg_cfg->va;
 	seg->is_gpu_seg = (seg_cfg->is_gpu_seg != 0);
+	seg->gpu_vendor = seg_cfg->gpu_vendor;
 	if (seg_cfg->flag.bs.token_policy != URMA_TOKEN_NONE) {
 		seg->token_value.token = seg_cfg->token_value.token;
 		seg->token_value_valid = true;
@@ -106,9 +116,24 @@ static int udma_exec_register_seg_cmd(urma_context_t *urma_ctx,
 		return 0;
 
 	if (seg_cfg->is_gpu_seg) {
+		uint32_t vendor = seg_cfg->gpu_vendor;
+
+		if (vendor == URMA_GPU_VENDOR_NONE)
+			vendor = (uint32_t)urma_detect_gpu_vendor();
+
 		ucmd.is_gpu_seg = 1;
+		ucmd.gpu_vendor = vendor;
 		udata.in_addr = (uint64_t)(uintptr_t)&ucmd;
 		udata.in_len = (uint32_t)sizeof(ucmd);
+		UDMA_LOG_INFO("register GPU seg va=0x%lx len=%lu vendor=%u (%s)\n",
+			      (unsigned long)seg_cfg->va,
+			      (unsigned long)seg_cfg->len, vendor,
+			      urma_gpu_vendor_name((urma_gpu_vendor_t)vendor));
+		(void)fprintf(stderr,
+			      "[udma-seg] GPU register va=0x%lx len=%lu vendor=%s\n",
+			      (unsigned long)seg_cfg->va,
+			      (unsigned long)seg_cfg->len,
+			      urma_gpu_vendor_name((urma_gpu_vendor_t)vendor));
 	}
 
 	ret = urma_cmd_register_seg(urma_ctx, urma_tseg, seg_cfg, &udata);

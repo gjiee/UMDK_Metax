@@ -988,6 +988,24 @@ typedef struct urma_token_id {
     urma_token_id_flag_t flag;
 } urma_token_id_t;
 
+/*
+ * GPU vendor for urma_register_seg() GPU-VA pin.
+ *
+ * Userspace puts this in urma_seg_cfg_t.gpu_vendor; the UDMA provider copies
+ * it into udma_register_seg_ucmd.gpu_vendor (the former reserved field).
+ * Kernel pin then dispatches:
+ *   NVIDIA -> nvidia_p2p_get_pages
+ *   MUXI   -> MetaX/沐曦 P2P (metax.ko) or dma-buf
+ *
+ * Numeric values are ABI: 0 must stay "unspecified" so old binaries that
+ * left the reserved ucmd word zero still mean NVIDIA when is_gpu_seg=1.
+ */
+typedef enum urma_gpu_vendor {
+    URMA_GPU_VENDOR_NONE = 0,    /* host memory, or auto-detect */
+    URMA_GPU_VENDOR_NVIDIA = 1,
+    URMA_GPU_VENDOR_MUXI = 2     /* MetaX / 沐曦 MACA */
+} urma_gpu_vendor_t;
+
 typedef struct urma_seg_cfg {
     uint64_t va;  /* specify the address of the segment to be registered */
     uint64_t len; /* specify the length of the segment to be registered */
@@ -996,7 +1014,8 @@ typedef struct urma_seg_cfg {
     urma_reg_seg_flag_t flag;
     uint64_t user_ctx;
     uint64_t iova; /* user iova, maybe zero-based-address */
-    uint32_t is_gpu_seg; //for GDR test
+    uint32_t is_gpu_seg; /* 1 = GPU VA; kernel must not pin_user_pages */
+    uint32_t gpu_vendor; /* urma_gpu_vendor_t; 0 = auto / legacy NVIDIA */
     /*
      * GDR ABI 扩展位置 (comment only, 当前未真正添加):
      *
