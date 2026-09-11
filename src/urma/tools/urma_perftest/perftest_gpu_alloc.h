@@ -27,7 +27,7 @@ typedef enum perftest_gpu_mode {
     PERFTEST_GPU_MODE_PEERMEM    = 2,
     PERFTEST_GPU_MODE_DIRECT     = 3,
     PERFTEST_GPU_MODE_PROXY_PURE = 4,
-    PERFTEST_GPU_MODE_METAX      = 5, /* Muxi MACA mcMalloc + kernel gpu_vendor=metax */
+    PERFTEST_GPU_MODE_METAX      = 5, /* MetaX MACA mcMalloc + kernel gpu_vendor=metax */
 } perftest_gpu_mode_t;
 
 typedef enum perftest_gpu_alloc_strategy {

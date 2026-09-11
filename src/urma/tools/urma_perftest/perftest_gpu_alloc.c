@@ -136,11 +136,7 @@ int perftest_gpu_mode_from_string(const char *s, perftest_gpu_mode_t *out)
     if (strcmp(s, "proxy_pure") == 0) { *out = PERFTEST_GPU_MODE_PROXY_PURE; return 0; }
     if (strcmp(s, "peermem")    == 0) { *out = PERFTEST_GPU_MODE_PEERMEM;    return 0; }
     if (strcmp(s, "direct")     == 0) { *out = PERFTEST_GPU_MODE_DIRECT;     return 0; }
-    if (strcmp(s, "metax")      == 0 || strcmp(s, "muxi") == 0 ||
-        strcmp(s, "mx")         == 0 || strcmp(s, "maca") == 0) {
-        *out = PERFTEST_GPU_MODE_METAX;
-        return 0;
-    }
+    if (strcmp(s, "metax")      == 0) { *out = PERFTEST_GPU_MODE_METAX;      return 0; }
     return -1;
 }
 

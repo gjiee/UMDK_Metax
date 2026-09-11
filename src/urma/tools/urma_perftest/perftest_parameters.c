@@ -208,7 +208,6 @@ default: disable.\n");
     (void)printf("                                direct     : cuMemAlloc + dma-buf fd export.\n");
     (void)printf("                                metax      : MACA mcMalloc GPU VA; kernel pins\n");
     (void)printf("                                             via udma.ko gpu_vendor=metax.\n");
-    (void)printf("                              Aliases for metax: muxi, mx, maca.\n");
     (void)printf("  --use_metax[=dev]           Same as --gpu-mode=metax; optional GPU ordinal.\n");
 }
 

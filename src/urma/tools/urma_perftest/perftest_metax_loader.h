@@ -3,7 +3,7 @@
  * Copyright (c) Huawei Technologies Co., Ltd. 2024-2026. All rights reserved.
  *
  * Thin MACA runtime loader (dlopen libmcruntime; no mc_runtime.h at build).
- * Used by --gpu-mode=metax so urma_perftest can mcMalloc a Muxi GPU VA
+ * Used by --gpu-mode=metax so urma_perftest can mcMalloc a MetaX GPU VA
  * that kernel udma.ko (gpu_vendor=metax) pins via metax_p2p_acquire_mem.
  */
 

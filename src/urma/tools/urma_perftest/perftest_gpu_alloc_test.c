@@ -151,16 +151,16 @@ int main(int argc, char **argv)
                m == PERFTEST_GPU_MODE_DIRECT, "from_string direct");
         EXPECT(perftest_gpu_mode_from_string("metax",   &m) == 0 &&
                m == PERFTEST_GPU_MODE_METAX, "from_string metax");
-        EXPECT(perftest_gpu_mode_from_string("muxi",    &m) == 0 &&
-               m == PERFTEST_GPU_MODE_METAX, "from_string muxi");
-        EXPECT(perftest_gpu_mode_from_string("mx",      &m) == 0 &&
-               m == PERFTEST_GPU_MODE_METAX, "from_string mx");
-        EXPECT(perftest_gpu_mode_from_string("maca",    &m) == 0 &&
-               m == PERFTEST_GPU_MODE_METAX, "from_string maca");
         EXPECT(perftest_gpu_mode_from_string("none",    &m) == 0 &&
                m == PERFTEST_GPU_MODE_NONE, "from_string none");
         EXPECT(perftest_gpu_mode_from_string("bogus",   &m) != 0,
                "from_string bogus must fail");
+        EXPECT(perftest_gpu_mode_from_string("muxi",    &m) != 0,
+               "from_string muxi must fail");
+        EXPECT(perftest_gpu_mode_from_string("mx",      &m) != 0,
+               "from_string mx must fail");
+        EXPECT(perftest_gpu_mode_from_string("maca",    &m) != 0,
+               "from_string maca must fail");
     }
 
     if (failures == 0) {
