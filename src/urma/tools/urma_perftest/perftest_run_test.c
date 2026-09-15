@@ -223,7 +223,9 @@ static int write_lat_zero_flags(perftest_context_t *ctx, perftest_config_t *cfg)
         write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
 
         if (perftest_gpu_is_device_va(gbuf)) {
+            /* peermem/GDR need a CUDA ctx; metax uses mcMemcpy, no libcuda. */
             if (perftest_gpu_needs_cpu_flag(gbuf) &&
+                perftest_cuda_is_loaded() &&
                 perftest_cuda_set_current_ctx() != 0) {
                 (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", i);
                 return -1;
@@ -1677,7 +1679,8 @@ static void *run_write_lat_duplex(void *arg)
     //get GPU proxy memory, gbuf has the GPU memory, local buffer is shadow memory
     perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, id);
     if (gbuf && (gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY ||
-                 perftest_gpu_needs_cpu_flag(gbuf))) {
+                 perftest_gpu_needs_cpu_flag(gbuf)) &&
+        perftest_cuda_is_loaded()) {
         perftest_cuda_set_current_ctx();
     }
 
