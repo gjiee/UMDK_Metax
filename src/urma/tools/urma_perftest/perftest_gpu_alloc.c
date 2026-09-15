@@ -84,6 +84,12 @@ static void unmap_gpu_bar(perftest_gpu_buffer_t *buf)
 
 static int setup_cpu_flag_access(perftest_gpu_buffer_t *out)
 {
+    /* MACA libgdrapi.so.2 relocates mcMemRemap; NVIDIA gdrcopy does not.
+     * Opening it from metax_lib/LD_LIBRARY_PATH aborts the process. */
+    if (out != NULL && out->strategy == PERFTEST_GPU_ALLOC_METAX) {
+        GA_LOG("MetaX: skip gdrcopy BAR, 1B mcMemcpy flag fallback");
+        return alloc_cpu_flag_scratch(out);
+    }
     if (try_map_gpu_bar(out) == 0) {
         return 0;
     }
