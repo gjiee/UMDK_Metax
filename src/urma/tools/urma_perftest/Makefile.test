@@ -9,18 +9,20 @@
 CC          ?= gcc
 CFLAGS      ?= -O2 -g -Wall -Wextra -std=c99 -D_GNU_SOURCE
 CFLAGS_EXTRA ?=
+URMA_INC    := -I../../lib/urma/core/include
 LDFLAGS     ?= -ldl
 
 TEST_BIN := perftest_gpu_alloc_test
 SRCS     := perftest_gpu_alloc.c perftest_cuda_loader.c \
-            perftest_gdrcopy_loader.c perftest_gpu_alloc_test.c
+            perftest_gdrcopy_loader.c perftest_gpu_alloc_test.c \
+            ../../lib/urma/core/urma_gpu_vendor.c
 
 .PHONY: all clean run
 
 all: $(TEST_BIN)
 
 $(TEST_BIN): $(SRCS) perftest_gpu_alloc.h
-	$(CC) $(CFLAGS) $(CFLAGS_EXTRA) -o $@ $(SRCS) $(LDFLAGS)
+	$(CC) $(CFLAGS) $(CFLAGS_EXTRA) $(URMA_INC) -o $@ $(SRCS) $(LDFLAGS)
 
 run: $(TEST_BIN)
 	./$(TEST_BIN)

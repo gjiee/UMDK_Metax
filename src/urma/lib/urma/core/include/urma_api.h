@@ -806,6 +806,17 @@ urma_status_t urma_free_token_id(urma_token_id_t *token_id);
 urma_target_seg_t *urma_register_seg(urma_context_t *ctx, urma_seg_cfg_t *seg_cfg);
 
 /**
+ * Detect the local GPU vendor for URMA GPU-seg registration.
+ * Order: urma_gpu_vendor_set_preferred(), then URMA_GPU_VENDOR /
+ * PERFTEST_GPU_VENDOR, then PCI (0x10de NVIDIA, 0x9999 MetaX), then
+ * kernel modules (nvidia / metax) and MACA install paths.
+ */
+urma_gpu_vendor_t urma_detect_gpu_vendor(void);
+const char *urma_gpu_vendor_name(urma_gpu_vendor_t vendor);
+int urma_gpu_vendor_from_string(const char *s, urma_gpu_vendor_t *out);
+void urma_gpu_vendor_set_preferred(urma_gpu_vendor_t vendor);
+
+/**
  * Unregister a local memory segment on specified va address.
  * @param[in] [Required] target_seg: target segment to be unregistered;
  * Return: 0 on success, other value on error

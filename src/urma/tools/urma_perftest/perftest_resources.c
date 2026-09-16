@@ -24,6 +24,7 @@
 
 #include "urma_types.h"
 #include "perftest_gpu_alloc.h"
+#include "perftest_cuda_loader.h"
 #include "perftest_resources.h"
 
 #define PERFTEST_DEF_ACCESS (URMA_ACCESS_READ | URMA_ACCESS_WRITE | URMA_ACCESS_ATOMIC)
@@ -824,11 +825,13 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
         }
 
         perftest_gpu_set_mode((perftest_gpu_mode_t)cfg->gpu_mode);
+        perftest_cuda_set_vendor_hint((perftest_gpu_vendor_t)cfg->gpu_vendor);
 
         fprintf(stderr,
-            "%s: GPU variant cmd=%d gpu-mode=%s -> perftest_gpu_alloc_buffer\n",
+            "%s: GPU variant cmd=%d gpu-mode=%s gpu-vendor=%s -> perftest_gpu_alloc_buffer\n",
             __func__, (int)cfg->cmd,
-            perftest_gpu_mode_name((perftest_gpu_mode_t)cfg->gpu_mode));
+            perftest_gpu_mode_name((perftest_gpu_mode_t)cfg->gpu_mode),
+            perftest_cuda_vendor_name((perftest_gpu_vendor_t)cfg->gpu_vendor));
     }
 
     for (i = 0; i < cfg->jettys; i++) {
@@ -921,6 +924,23 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
                     (gbuf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
                      gbuf->strategy == PERFTEST_GPU_ALLOC_GDR);
                 seg_cfg.is_gpu_seg = truly_gpu ? 1 : 0;
+                if (truly_gpu) {
+                    uint32_t vendor = (uint32_t)gbuf->vendor;
+                    if (vendor == PERFTEST_GPU_VENDOR_NONE) {
+                        vendor = (uint32_t)perftest_cuda_get_vendor();
+                    }
+                    if (vendor == PERFTEST_GPU_VENDOR_NONE) {
+                        vendor = (uint32_t)urma_detect_gpu_vendor();
+                    }
+                    seg_cfg.gpu_vendor = vendor;
+                    (void)fprintf(stderr,
+                        "%s: GPU seg j=%u vendor=%s strategy=%s va=%p\n",
+                        __func__, j, urma_gpu_vendor_name((urma_gpu_vendor_t)vendor),
+                        perftest_gpu_alloc_strategy_name(gbuf->strategy),
+                        (void *)(uintptr_t)seg_cfg.va);
+                } else {
+                    seg_cfg.gpu_vendor = URMA_GPU_VENDOR_NONE;
+                }
             }
             if (ctx->urma_ctx->dev->type == URMA_TRANSPORT_UB) {
                 seg_cfg.token_id = ctx->token_id[j];
