@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <math.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "urma_api.h"
 #include "urma_ubagg.h"
@@ -117,7 +118,7 @@ static int write_lat_gpu_recv_all_zero(perftest_gpu_buffer_t *gbuf,
     if (tmp == NULL) {
         return -1;
     }
-    if (perftest_cuda_memcpy_d2h(tmp, gpu_recv, nbytes) != 0) {
+    if (perftest_validation_memcpy_d2h(tmp, gpu_recv, nbytes) != 0) {
         free(tmp);
         return -1;
     }
@@ -223,7 +224,9 @@ static int write_lat_zero_flags(perftest_context_t *ctx, perftest_config_t *cfg)
         write_lat_bind_flag_ptrs(gbuf, gpu_poll_va, gpu_post_va, &poll_buf, &post_buf);
 
         if (perftest_gpu_is_device_va(gbuf)) {
+            /* peermem/GDR need a CUDA ctx; metax uses mcMemcpy, no libcuda. */
             if (perftest_gpu_needs_cpu_flag(gbuf) &&
+                perftest_cuda_is_loaded() &&
                 perftest_cuda_set_current_ctx() != 0) {
                 (void)fprintf(stderr, "Failed to init GPU write_lat flags, id:%u\n", i);
                 return -1;
@@ -1677,7 +1680,8 @@ static void *run_write_lat_duplex(void *arg)
     //get GPU proxy memory, gbuf has the GPU memory, local buffer is shadow memory
     perftest_gpu_buffer_t *gbuf = perftest_ctx_gpu_buf(ctx, cfg, id);
     if (gbuf && (gbuf->strategy == PERFTEST_GPU_ALLOC_HOST_PROXY ||
-                 perftest_gpu_needs_cpu_flag(gbuf))) {
+                 perftest_gpu_needs_cpu_flag(gbuf)) &&
+        perftest_cuda_is_loaded()) {
         perftest_cuda_set_current_ctx();
     }
 
@@ -1793,14 +1797,14 @@ static int write_lat_gpu_zero_buffer(perftest_gpu_buffer_t *gbuf, void *gpu_va,
         memset(bar, 0, nbytes);
         return 0;
     }
-    if (perftest_cuda_set_current_ctx() != 0) {
+    if (perftest_cuda_is_loaded() && perftest_cuda_set_current_ctx() != 0) {
         return -1;
     }
     zeros = calloc(1, nbytes);
     if (zeros == NULL) {
         return -1;
     }
-    rc = perftest_cuda_memcpy_h2d(gpu_va, zeros, nbytes);
+    rc = perftest_validation_memcpy_h2d(gpu_va, zeros, nbytes);
     free(zeros);
     return rc;
 }
@@ -1836,6 +1840,19 @@ static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t
                     recv_base, cfg->size,
                     perftest_gpu_has_bar_map(gbuf) ? "yes" : "no");
             }
+            /* GPU-GPU (MetaX both sides): plant magic on send, INIT mark on recv. */
+            if (eye) {
+                if (perftest_gdr_eye_plant(send_base, cfg->size, true) != 0) {
+                    (void)fprintf(stderr,
+                        "[gdr-verify] FAIL: plant GPU send seg=%u va=%p\n",
+                        i, send_base);
+                }
+                if (perftest_gdr_eye_init_gpu_recv(recv_base, cfg->size) != 0) {
+                    (void)fprintf(stderr,
+                        "[gdr-verify] FAIL: init GPU recv seg=%u va=%p\n",
+                        i, recv_base);
+                }
+            }
             continue;
         }
 
@@ -1849,7 +1866,7 @@ static void write_lat_gdr_eye_prepare(perftest_context_t *ctx, perftest_config_t
                 i, payload, PERFTEST_WRITE_LAT_VALID_SEED);
         }
         if (eye) {
-            (void)perftest_gdr_eye_plant_host(send_base, cfg->size);
+            (void)perftest_gdr_eye_plant(send_base, cfg->size, false);
         }
     }
 }
@@ -1871,16 +1888,17 @@ static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t 
             continue;
         }
         if (perftest_gpu_needs_cpu_flag(gbuf) &&
+            perftest_cuda_is_loaded() &&
             perftest_cuda_set_current_ctx() != 0) {
+            (void)fprintf(stderr,
+                "[gdr-verify] finish: cuCtxSetCurrent failed seg=%u\n", i);
             continue;
         }
         if (write_lat_gpu_recv_all_zero(gbuf, ctx->local_buf[i], cfg->size,
                 &all_zero) != 0) {
             (void)fprintf(stderr,
                 "[gdr-verify] finish: recv check failed seg=%u\n", i);
-            continue;
-        }
-        if (all_zero) {
+        } else if (all_zero) {
             (void)fprintf(stderr,
                 "[gdr-verify] finish: GPU recv[%u] @%p still all zeros "
                 "(DMA did NOT land)\n",
@@ -1888,10 +1906,11 @@ static void write_lat_gdr_eye_finish(perftest_context_t *ctx, perftest_config_t 
         } else {
             (void)fprintf(stderr,
                 "[gdr-verify] finish: GPU recv[%u] @%p NON-ZERO "
-                "(DMA hit, content ignored)\n",
+                "(DMA hit; dumping content)\n",
                 cfg->size, ctx->local_buf[i]);
-            (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
         }
+        /* Always D2H-dump recv prefix: PASS magic / FAIL INIT / CHECK hex. */
+        (void)perftest_gdr_eye_dump_gpu_recv(ctx->local_buf[i], cfg->size);
     }
 }
 #endif /* PERFTEST_ENABLE_GPU_DEBUG */
@@ -1906,6 +1925,9 @@ static int run_write_lat_once(perftest_context_t *ctx, perftest_config_t *cfg)
     }
 
 #if PERFTEST_ENABLE_GPU_DEBUG
+    (void)fprintf(stderr,
+        "[gdr-verify] PERFTEST_ENABLE_GPU_DEBUG=1 "
+        "(plant magic + D2H dump GPU recv after write_lat)\n");
     write_lat_gdr_eye_prepare(ctx, cfg);
 #endif
 

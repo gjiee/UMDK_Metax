@@ -14,6 +14,10 @@
 #include "udma_u_common.h"
 #include "udma_u_segment.h"
 
+/*
+ * Must match kernel struct udma_register_seg_ucmd (udma_gpu_p2p.h).
+ * reserved stays 0. Vendor pin is udma.ko gpu_vendor=, not this word.
+ */
 struct udma_register_seg_ucmd {
 	uint32_t is_gpu_seg;
 	uint32_t reserved;
@@ -160,7 +164,11 @@ urma_target_seg_t *udma_u_register_seg(urma_context_t *urma_ctx,
 
 	udma_u_init_seg_cfg(urma_ctx, seg_cfg, seg);
 
-	/* Host and GPU segs both need MAPT grant (GPU skip was a test mistake). */
+	/*
+	 * MAPT grant is still required for GPU segs (token/perm). Kernel
+	 * gpu pin only replaces pin_user_pages; it does not install MAPT.
+	 * Skipping grant here was a test mistake on the NVIDIA path.
+	 */
 	ret = udma_u_grant_segment(seg);
 	if (ret) {
 		UDMA_LOG_ERR("segment grant failed, access = %d, ret = %d.\n",

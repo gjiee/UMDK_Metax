@@ -3,7 +3,7 @@
 #
 # Minimal unit test (libc + dl only):
 #   make -f Makefile.test && ./perftest_gpu_alloc_test
-# Optional GPU diagnostics (off by default in CMake too):
+# Optional GPU diagnostics (CMake default ON for urma_perftest):
 #   make -f Makefile.test CFLAGS_EXTRA="-DPERFTEST_ENABLE_GPU_DEBUG=1"
 
 CC          ?= gcc
@@ -13,7 +13,8 @@ LDFLAGS     ?= -ldl
 
 TEST_BIN := perftest_gpu_alloc_test
 SRCS     := perftest_gpu_alloc.c perftest_cuda_loader.c \
-            perftest_gdrcopy_loader.c perftest_gpu_alloc_test.c
+            perftest_metax_loader.c perftest_gdrcopy_loader.c \
+            perftest_validation.c perftest_gpu_alloc_test.c
 
 .PHONY: all clean run
 

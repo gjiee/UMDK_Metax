@@ -824,6 +824,7 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
         }
 
         perftest_gpu_set_mode((perftest_gpu_mode_t)cfg->gpu_mode);
+        perftest_gpu_set_device_id(cfg->gpu_dev_id);
 
         fprintf(stderr,
             "%s: GPU variant cmd=%d gpu-mode=%s -> perftest_gpu_alloc_buffer\n",
@@ -917,9 +918,7 @@ static int register_mem(perftest_context_t *ctx, perftest_config_t *cfg)
             {
                 perftest_gpu_buffer_t *gbuf = (ctx->gpu_bufs != NULL && j < ctx->gpu_bufs_n)
                     ? &ctx->gpu_bufs[j] : NULL;
-                bool truly_gpu = gbuf != NULL &&
-                    (gbuf->strategy == PERFTEST_GPU_ALLOC_PEERMEM ||
-                     gbuf->strategy == PERFTEST_GPU_ALLOC_GDR);
+                bool truly_gpu = perftest_gpu_is_device_va(gbuf);
                 seg_cfg.is_gpu_seg = truly_gpu ? 1 : 0;
             }
             if (ctx->urma_ctx->dev->type == URMA_TRANSPORT_UB) {

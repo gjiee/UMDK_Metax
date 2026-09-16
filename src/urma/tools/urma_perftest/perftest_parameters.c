@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <getopt.h>
 #include <unistd.h>
 #include <linux/limits.h>
@@ -195,7 +196,7 @@ default: disable.\n");
     (void)printf("  --stdout                    Print logs to console.\n");
     (void)printf("  --aggr_mode                 Set bond device aggregation mode, support: standalone, \
  active_backup, balance, default: disable\n");
-    (void)printf("  --gpu-mode={proxy|proxy_pure|peermem|direct}\n");
+    (void)printf("  --gpu-mode={proxy|proxy_pure|peermem|direct|metax}\n");
     (void)printf("                              Select GPU memory allocation for *_gpu commands.\n");
     (void)printf("                              Default (flag absent) = memalign.\n");
     (void)printf("                                proxy      : host shadow + GPU; BW/LAT timed path\n");
@@ -205,6 +206,9 @@ default: disable.\n");
     (void)printf("                                             BW/LAT (NIC-on-shadow only).\n");
     (void)printf("                                peermem    : cuMemAlloc GPU VA + peermem pin.\n");
     (void)printf("                                direct     : cuMemAlloc + dma-buf fd export.\n");
+    (void)printf("                                metax      : MACA mcMalloc GPU VA; kernel pins\n");
+    (void)printf("                                             via udma.ko gpu_vendor=metax.\n");
+    (void)printf("  --use_metax[=dev]           Same as --gpu-mode=metax; optional GPU ordinal.\n");
 }
 
 static perftest_cmd_type_t parse_command(const char *argv1)
@@ -391,6 +395,7 @@ static void init_cfg(perftest_config_t *cfg)
     cfg->write_dirty_period = PERFTEST_WRITE_DIRTY_PERIOD;
     /* GPU 模式默认 NONE = memalign (与原 read_lat / write_lat 等价). */
     cfg->gpu_mode = (int)PERFTEST_GPU_MODE_NONE;
+    cfg->gpu_dev_id = 0;
     cfg->pair_flag = false;
     cfg->enable_async_import = false;
     cfg->tp_aware = false;
@@ -629,8 +634,9 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
         {"bind_ip",       required_argument, NULL, PERFTEST_OPT_BIND_IP},
         {"aggr_mode",     required_argument, NULL, PERFTEST_OPT_AGGR_MODE },
         {"stdout",        no_argument,       NULL, PERFTEST_OPT_STDOUT },
-        /* --gpu-mode={proxy|peermem|direct}; 缺省 = memalign (= NONE). */
+        /* --gpu-mode={proxy|peermem|direct|metax}; 缺省 = memalign (= NONE). */
         {"gpu-mode",      required_argument, NULL, PERFTEST_OPT_GPU_MODE },
+        {"use_metax",     optional_argument, NULL, PERFTEST_OPT_USE_METAX },
         {NULL,            no_argument,       NULL, '\0'}
     };
 
@@ -994,11 +1000,30 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
                 if (perftest_gpu_mode_from_string(optarg, &m) != 0) {
                     (void)fprintf(stderr,
                         "Invalid --gpu-mode=%s "
-                        "(expected: proxy|proxy_pure|peermem|direct)\n",
+                        "(expected: proxy|proxy_pure|peermem|direct|metax)\n",
                         optarg);
                     return -1;
                 }
                 cfg->gpu_mode = (int)m;
+                break;
+            }
+            case PERFTEST_OPT_USE_METAX: {
+                unsigned long dev = 0;
+
+                cfg->gpu_mode = (int)PERFTEST_GPU_MODE_METAX;
+                cfg->gpu_dev_id = 0;
+                if (optarg != NULL && optarg[0] != '\0') {
+                    char *end = NULL;
+
+                    errno = 0;
+                    dev = strtoul(optarg, &end, 0);
+                    if (errno != 0 || end == optarg || (end != NULL && *end != '\0') ||
+                        dev > 64UL) {
+                        (void)fprintf(stderr, "Invalid --use_metax=%s\n", optarg);
+                        return -1;
+                    }
+                    cfg->gpu_dev_id = (int)dev;
+                }
                 break;
             }
             default:

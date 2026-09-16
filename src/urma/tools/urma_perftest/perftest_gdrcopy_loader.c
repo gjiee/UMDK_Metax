@@ -9,6 +9,7 @@
 #include "perftest_gdrcopy_loader.h"
 
 #include <dlfcn.h>
+#include <link.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,46 @@ static int env_disabled(void)
     return (e != NULL && e[0] == '1' && e[1] == '\0');
 }
 
+static int gdrapi_is_maca(void *lib, const char *hint)
+{
+    struct link_map *map = NULL;
+    const char *path = hint;
+
+    if (lib != NULL && dlinfo(lib, RTLD_DI_LINKMAP, &map) == 0 &&
+        map != NULL && map->l_name != NULL && map->l_name[0] != '\0') {
+        path = map->l_name;
+    }
+    if (path != NULL &&
+        (strstr(path, "metax_lib") != NULL ||
+         strstr(path, "/maca/") != NULL ||
+         strstr(path, "/maca-") != NULL)) {
+        return 1;
+    }
+    /* MACA gdrapi pulls mcMemRemap from libmcruntime; NVIDIA gdrcopy does not. */
+    return (lib != NULL && dlsym(lib, "mcMemRemap") != NULL);
+}
+
+static void *dlopen_nvidia_gdrapi(const char *path, const char **opened_path)
+{
+    void *lib;
+
+    (void)dlerror();
+    lib = dlopen(path, RTLD_LAZY);
+    if (lib == NULL) {
+        return NULL;
+    }
+    if (gdrapi_is_maca(lib, path)) {
+        GDR_LOG("skip MACA libgdrapi %s (mcMemRemap ABI, not NVIDIA gdrcopy)",
+                path);
+        dlclose(lib);
+        return NULL;
+    }
+    if (opened_path != NULL) {
+        *opened_path = path;
+    }
+    return lib;
+}
+
 static void *try_dlopen_gdrapi(const char **opened_path)
 {
     /*
@@ -93,23 +134,16 @@ static void *try_dlopen_gdrapi(const char **opened_path)
     int i;
 
     if (env != NULL && env[0] != '\0') {
-        lib = dlopen(env, RTLD_LAZY);
+        lib = dlopen_nvidia_gdrapi(env, opened_path);
         if (lib != NULL) {
-            if (opened_path != NULL) {
-                *opened_path = env;
-            }
             return lib;
         }
-        GDR_LOG("PERFTEST_GDRCOPY_LIB=%s failed: %s", env, dlerror());
+        GDR_LOG("PERFTEST_GDRCOPY_LIB=%s not usable", env);
     }
 
     for (i = 0; candidates[i] != NULL; i++) {
-        (void)dlerror();
-        lib = dlopen(candidates[i], RTLD_LAZY);
+        lib = dlopen_nvidia_gdrapi(candidates[i], opened_path);
         if (lib != NULL) {
-            if (opened_path != NULL) {
-                *opened_path = candidates[i];
-            }
             return lib;
         }
     }
