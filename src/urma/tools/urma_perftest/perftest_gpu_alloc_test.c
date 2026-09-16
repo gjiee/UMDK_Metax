@@ -9,8 +9,6 @@
 #include <string.h>
 
 #include "perftest_gpu_alloc.h"
-#include "perftest_cuda_loader.h"
-#include "urma_api.h"
 
 /* 简洁 print 宏, 与被测代码一致用 __func__. */
 #define T_LOG(fmt, ...) \
@@ -144,44 +142,6 @@ int main(int argc, char **argv)
                m == PERFTEST_GPU_MODE_NONE, "from_string none");
         EXPECT(perftest_gpu_mode_from_string("bogus",   &m) != 0,
                "from_string bogus must fail");
-    }
-
-    {
-        urma_gpu_vendor_t v;
-
-        EXPECT(urma_gpu_vendor_from_string("muxi", &v) == 0 &&
-               v == URMA_GPU_VENDOR_MUXI, "from_string muxi");
-        EXPECT(urma_gpu_vendor_from_string("MUXI", &v) == 0 &&
-               v == URMA_GPU_VENDOR_MUXI, "from_string MUXI");
-        EXPECT(urma_gpu_vendor_from_string("metax", &v) == 0 &&
-               v == URMA_GPU_VENDOR_MUXI, "from_string metax");
-        EXPECT(urma_gpu_vendor_from_string("maca", &v) == 0 &&
-               v == URMA_GPU_VENDOR_MUXI, "from_string maca");
-        EXPECT(urma_gpu_vendor_from_string("nvidia", &v) == 0 &&
-               v == URMA_GPU_VENDOR_NVIDIA, "from_string nvidia");
-        EXPECT(urma_gpu_vendor_from_string("auto", &v) == 0 &&
-               v == URMA_GPU_VENDOR_NONE, "from_string auto");
-        EXPECT(urma_gpu_vendor_from_string("bogus", &v) != 0,
-               "from_string vendor bogus must fail");
-
-        unsetenv("PERFTEST_GPU_VENDOR");
-        setenv("URMA_GPU_VENDOR", "muxi", 1);
-        EXPECT(urma_detect_gpu_vendor() == URMA_GPU_VENDOR_MUXI,
-               "env URMA_GPU_VENDOR=muxi");
-        setenv("URMA_GPU_VENDOR", "nvidia", 1);
-        EXPECT(urma_detect_gpu_vendor() == URMA_GPU_VENDOR_NVIDIA,
-               "env URMA_GPU_VENDOR=nvidia");
-        unsetenv("URMA_GPU_VENDOR");
-
-        urma_gpu_vendor_set_preferred(URMA_GPU_VENDOR_MUXI);
-        EXPECT(urma_detect_gpu_vendor() == URMA_GPU_VENDOR_MUXI,
-               "preferred muxi overrides env");
-        urma_gpu_vendor_set_preferred(URMA_GPU_VENDOR_NONE);
-
-        EXPECT(strcmp(urma_gpu_vendor_name(URMA_GPU_VENDOR_MUXI), "muxi") == 0,
-               "vendor name muxi");
-        EXPECT(strcmp(perftest_cuda_vendor_name(PERFTEST_GPU_VENDOR_NVIDIA),
-                      "nvidia") == 0, "cuda vendor name nvidia");
     }
 
     if (failures == 0) {

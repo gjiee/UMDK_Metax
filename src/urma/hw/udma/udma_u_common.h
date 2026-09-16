@@ -222,7 +222,6 @@ struct udma_u_segment {
 	uint64_t va;                  /* specify the address of the segment to be registered */
 	uint32_t tid;
 	bool is_gpu_seg;
-	uint32_t gpu_vendor; /* urma_gpu_vendor_t copied from seg_cfg */
 };
 
 struct udma_u_target_jetty {

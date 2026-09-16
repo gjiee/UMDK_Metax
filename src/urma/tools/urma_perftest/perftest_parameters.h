@@ -215,8 +215,6 @@ enum perftest_opts {
      *   docs/urma_gpu_mode_cli.md.
      */
     PERFTEST_OPT_GPU_MODE,
-    /* NVIDIA vs Muxi (MetaX / 沐曦); default auto-detect. */
-    PERFTEST_OPT_GPU_VENDOR,
     /* Split -s into consecutive WQEs of this payload (write/read BW). */
     PERFTEST_OPT_WR_SPLIT,
 };
@@ -356,7 +354,6 @@ typedef struct perftest_config {
      * register_mem 走老路径 memalign. 见 perftest_gpu_alloc.h.
      */
     int      gpu_mode;       /* enum perftest_gpu_mode_t 值, 用 int 避免循环 include */
-    int      gpu_vendor;     /* enum perftest_gpu_vendor_t: 0=auto, 1=nvidia, 2=muxi */
 } perftest_config_t;
 
 typedef struct perftest_value_range {
