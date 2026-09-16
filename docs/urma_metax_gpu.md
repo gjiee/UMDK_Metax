@@ -24,6 +24,30 @@ urma_perftest write_bw_gpu --use_metax=0    -d <ub_dev>
 
 库搜索：`PERFTEST_METAX_LIB`、`$MACA_PATH/{lib,lib64}`、`/opt/maca`、`/usr/local/maca`、默认 linker path。
 
+## gdr-verify（读 GPU 内容）
+
+`write_lat_gpu` 的 content verifier 由 **编译开关** 打开，不是 CLI：
+
+```bash
+# 在 src/ 的 build 目录；已有 CMakeCache 时必须显式 -D，否则会沿用旧的 OFF
+cmake -DPERFTEST_ENABLE_GPU_DEBUG=ON ..
+make urma_perftest -j
+```
+
+确认二进制里有 verifier：
+
+```bash
+strings bin/urma_perftest | grep -E "gdr-verify|test GDR write|GPU_RECV_UNWRITTEN"
+```
+
+跑 `write_lat_gpu --gpu-mode=metax` 时 stderr 应出现：
+
+- `[gdr-verify] PERFTEST_ENABLE_GPU_DEBUG=1`
+- `GPU planted "test GDR write"` / `GPU recv prefilled with "GPU_RECV_UNWRITTEN"`
+- 结束后 D2H dump：`PASS: saw magic`（WRITE 落到 GPU）或 `FAIL: still INIT mark`（没落到 GPU）
+
+这条路径会 D2H 读 recv，**不要拿这时的 t_avg 当性能数**。测 latency 用 `-DPERFTEST_ENABLE_GPU_DEBUG=OFF`。
+
 ## 不要和 PR #38 混用
 
 另一份用户态草稿把 `reserved` 改成 `gpu_vendor` 并让内核按 ucmd 分发。那和 PR #21 不一致：本树按内核模块参数选卡。

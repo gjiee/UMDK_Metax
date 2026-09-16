@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "perftest_gpu_alloc.h"
+#include "perftest_validation.h"
 
 /* 简洁 print 宏, 与被测代码一致用 __func__. */
 #define T_LOG(fmt, ...) \
@@ -161,6 +162,29 @@ int main(int argc, char **argv)
                "from_string mx must fail");
         EXPECT(perftest_gpu_mode_from_string("maca",    &m) != 0,
                "from_string maca must fail");
+    }
+
+    /*
+     * gdr-verify plant: magic at send[0], last-byte flag left alone.
+     */
+    {
+        char buf[64];
+        const char *magic = perftest_gdr_eye_magic();
+        size_t magic_len = strlen(magic);
+
+        memset(buf, 0xaa, sizeof(buf));
+        EXPECT(perftest_gdr_eye_plant_host(buf, (uint32_t)sizeof(buf)) == 0,
+               "plant_host");
+        EXPECT(memcmp(buf, magic, magic_len) == 0, "magic at send[0]");
+        EXPECT((unsigned char)buf[sizeof(buf) - 1u] == 0xaau,
+               "flag byte size-1 untouched");
+        EXPECT(perftest_gdr_eye_min_size() == magic_len + 1u, "min_size = magic+flag");
+        EXPECT(perftest_gdr_eye_plant(buf, (uint32_t)sizeof(buf), false) == 0,
+               "plant host via is_device_va=false");
+        EXPECT(perftest_gdr_eye_plant(buf, (uint32_t)sizeof(buf), true) != 0,
+               "plant GPU without CUDA/MetaX must fail");
+        EXPECT(perftest_validation_memcpy_h2d(buf, buf, 1) != 0,
+               "memcpy without GPU loader must fail");
     }
 
     if (failures == 0) {

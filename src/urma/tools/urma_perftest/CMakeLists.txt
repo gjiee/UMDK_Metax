@@ -3,8 +3,11 @@
 
 # perftest_mem_*.c: legacy pluggable-memory stubs (compile-time only).
 # Active GPU path: perftest_gpu_alloc + cuda/gdrcopy loaders + validation.
+# gdr-verify: plant magic in send, D2H-dump GPU recv after write_lat.
+# Default ON so MetaX/NVIDIA DMA landing can be eyeballed; set OFF for perf numbers.
 option(PERFTEST_ENABLE_GPU_DEBUG
-    "Enable GPU validation/gdr-verify diagnostics in urma_perftest" OFF)
+    "Enable GPU validation/gdr-verify diagnostics in urma_perftest" ON)
+message(STATUS "PERFTEST_ENABLE_GPU_DEBUG=${PERFTEST_ENABLE_GPU_DEBUG}")
 
 add_executable(urma_perftest
     urma_perftest.c
