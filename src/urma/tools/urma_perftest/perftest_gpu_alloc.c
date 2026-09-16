@@ -170,7 +170,7 @@ static int try_alloc_gdr(size_t size, size_t alignment,
     }
 
     if (perftest_cuda_loader_init() != 0) {
-        GA_LOG("FAIL: NVIDIA libcuda / Muxi MACA runtime not available");
+        GA_LOG("FAIL: libcuda not available");
         return -1;
     }
     if (perftest_cuda_ctx_create(0) != 0) {
@@ -194,7 +194,6 @@ static int try_alloc_gdr(size_t size, size_t alignment,
     out->dmabuf_fd = fd;
     out->dmabuf_offset = off;
     out->strategy = PERFTEST_GPU_ALLOC_GDR;
-    out->vendor = perftest_cuda_get_vendor();
     if (setup_cpu_flag_access(out) != 0) {
         close(fd);
         perftest_cuda_mem_free(dptr);
@@ -202,9 +201,8 @@ static int try_alloc_gdr(size_t size, size_t alignment,
         return -1;
     }
 
-    GA_LOG("OK: dptr=%p fd=%d size=%zu bar=%s vendor=%s", dptr, fd, size,
-           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback",
-           perftest_cuda_vendor_name(out->vendor));
+    GA_LOG("OK: dptr=%p fd=%d size=%zu bar=%s", dptr, fd, size,
+           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback");
     return 0;
 }
 /*
@@ -246,7 +244,7 @@ static int try_alloc_peermem(size_t size, size_t alignment,
     }
 
     if (perftest_cuda_loader_init() != 0) {
-        GA_LOG("FAIL: NVIDIA libcuda / Muxi MACA runtime not present");
+        GA_LOG("FAIL: libcuda.so.1 not present");
         return -1;
     }
     /*
@@ -266,7 +264,7 @@ static int try_alloc_peermem(size_t size, size_t alignment,
         return -1;
     }
 
-    /* Required before nvidia_p2p_get_pages; no-op on Muxi/MACA. */
+    /* Required before nvidia_p2p_get_pages on the modern token-less path. */
     if (perftest_cuda_set_sync_memops(dptr) != 0) {
         GA_LOG("FAIL: SYNC_MEMOPS on dptr=%p", dptr);
         (void)perftest_cuda_mem_free(dptr);
@@ -279,16 +277,14 @@ static int try_alloc_peermem(size_t size, size_t alignment,
     out->size = alloc_size;
     out->dmabuf_fd = -1;
     out->strategy = PERFTEST_GPU_ALLOC_PEERMEM;
-    out->vendor = perftest_cuda_get_vendor();
     if (setup_cpu_flag_access(out) != 0) {
         (void)perftest_cuda_mem_free(dptr);
         memset(out, 0, sizeof(*out));
         return -1;
     }
 
-    GA_LOG("OK: dptr=%p req=%zu alloc=%zu bar=%s vendor=%s", dptr, size, alloc_size,
-           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback",
-           perftest_cuda_vendor_name(out->vendor));
+    GA_LOG("OK: dptr=%p req=%zu alloc=%zu bar=%s", dptr, size, alloc_size,
+           out->bar_cpu_base != NULL ? "mapped" : "d2h-fallback");
     return 0;
 }
 
@@ -310,7 +306,7 @@ static int try_alloc_host_proxy(size_t size, size_t alignment,
     sim       = getenv("PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM");
 
     if (!have_cuda && (sim == NULL || strcmp(sim, "1") != 0)) {
-        GA_LOG("FAIL: NVIDIA libcuda / Muxi MACA runtime not present "
+        GA_LOG("FAIL: libcuda.so.1 not present "
                "and PERFTEST_GPU_ALLOC_ALLOW_HOST_PROXY_SIM!=1");
         return -1;
     }
@@ -350,11 +346,9 @@ static int try_alloc_host_proxy(size_t size, size_t alignment,
     out->size = size;
     out->dmabuf_fd = -1;
     out->strategy = PERFTEST_GPU_ALLOC_HOST_PROXY;
-    out->vendor = have_cuda ? perftest_cuda_get_vendor() : PERFTEST_GPU_VENDOR_NONE;
 
-    GA_LOG("OK: gpu_ptr=%p shadow=%p size=%zu have_cuda=%d vendor=%s",
-           gpu_ptr, shadow, size, have_cuda,
-           perftest_cuda_vendor_name(out->vendor));
+    GA_LOG("OK: gpu_ptr=%p shadow=%p size=%zu have_cuda=%d",
+           gpu_ptr, shadow, size, have_cuda);
     return 0;
 }
 

@@ -19,7 +19,6 @@
 #include "ub_util.h"
 #include "ub_get_clock.h"
 #include "urma_types.h"
-#include "urma_api.h"
 #include "urma_ubagg.h"
 #include "urma_types_str.h"
 #include "perftest_communication.h"
@@ -204,14 +203,8 @@ default: disable.\n");
     (void)printf("                                             post; READ: H2D after CQE; LAT: both).\n");
     (void)printf("                                proxy_pure : same alloc as proxy; no staging in\n");
     (void)printf("                                             BW/LAT (NIC-on-shadow only).\n");
-    (void)printf("                                peermem    : GPU VA + peermem pin "
-                 "(NVIDIA nvidia_p2p / Muxi metax).\n");
-    (void)printf("                                direct     : GPU VA + dma-buf fd export.\n");
-    (void)printf("  --gpu-vendor={auto|nvidia|muxi}\n");
-    (void)printf("                              GPU vendor for *_gpu register_seg pin.\n");
-    (void)printf("                              Default auto: PCI 0x10de=NVIDIA, 0x9999=Muxi,\n");
-    (void)printf("                              or URMA_GPU_VENDOR / PERFTEST_GPU_VENDOR env.\n");
-    (void)printf("                              muxi/metax/maca aliases select 沐曦 MACA.\n");
+    (void)printf("                                peermem    : cuMemAlloc GPU VA + peermem pin.\n");
+    (void)printf("                                direct     : cuMemAlloc + dma-buf fd export.\n");
 }
 
 static perftest_cmd_type_t parse_command(const char *argv1)
@@ -398,7 +391,6 @@ static void init_cfg(perftest_config_t *cfg)
     cfg->write_dirty_period = PERFTEST_WRITE_DIRTY_PERIOD;
     /* GPU 模式默认 NONE = memalign (与原 read_lat / write_lat 等价). */
     cfg->gpu_mode = (int)PERFTEST_GPU_MODE_NONE;
-    cfg->gpu_vendor = (int)PERFTEST_GPU_VENDOR_NONE;
     cfg->pair_flag = false;
     cfg->enable_async_import = false;
     cfg->tp_aware = false;
@@ -639,7 +631,6 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
         {"stdout",        no_argument,       NULL, PERFTEST_OPT_STDOUT },
         /* --gpu-mode={proxy|peermem|direct}; 缺省 = memalign (= NONE). */
         {"gpu-mode",      required_argument, NULL, PERFTEST_OPT_GPU_MODE },
-        {"gpu-vendor",    required_argument, NULL, PERFTEST_OPT_GPU_VENDOR },
         {NULL,            no_argument,       NULL, '\0'}
     };
 
@@ -1008,19 +999,6 @@ int perftest_parse_args(int argc, char *argv[], perftest_config_t *cfg)
                     return -1;
                 }
                 cfg->gpu_mode = (int)m;
-                break;
-            }
-            case PERFTEST_OPT_GPU_VENDOR: {
-                urma_gpu_vendor_t uv;
-
-                if (urma_gpu_vendor_from_string(optarg, &uv) != 0) {
-                    (void)fprintf(stderr,
-                        "Invalid --gpu-vendor=%s "
-                        "(expected: auto|nvidia|muxi|metax|maca)\n",
-                        optarg);
-                    return -1;
-                }
-                cfg->gpu_vendor = (int)uv;
                 break;
             }
             default:

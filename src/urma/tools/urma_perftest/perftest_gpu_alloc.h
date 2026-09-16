@@ -17,8 +17,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "perftest_cuda_loader.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,7 +49,6 @@ typedef struct perftest_gpu_buffer {
     size_t                         bar_map_size;
     unsigned long                  bar_mh;
     perftest_gpu_alloc_strategy_t  strategy;
-    perftest_gpu_vendor_t          vendor;
 } perftest_gpu_buffer_t;
 
 int  perftest_gpu_alloc_buffer(size_t size, size_t alignment,
