@@ -87,8 +87,22 @@ static int setup_cpu_flag_access(perftest_gpu_buffer_t *out)
     /* MACA libgdrapi.so.2 relocates mcMemRemap; NVIDIA gdrcopy does not.
      * Opening it from metax_lib/LD_LIBRARY_PATH aborts the process. */
     if (out != NULL && out->strategy == PERFTEST_GPU_ALLOC_METAX) {
-        GA_LOG("MetaX: skip gdrcopy BAR, 1B mcMemcpy flag fallback");
-        return alloc_cpu_flag_scratch(out);
+        /*
+         * MXGDA: opt-in experiment. When PERFTEST_ALLOW_MACA_GDRAPI=1, do not
+         * short-circuit to the mcMemcpy fallback for METAX buffers: fall
+         * through to try_map_gpu_bar() so the CPU can map GPU HBM directly and
+         * flag polling costs a load instead of a ~13us D2H memcpy.
+         * WARNING: the note above says opening MACA libgdrapi can abort the
+         * process. Only enable for benchmarking, never in production.
+         */
+        const char *e = getenv("PERFTEST_ALLOW_MACA_GDRAPI");
+        int allow = (e != NULL && e[0] == '1' && e[1] == '\0');
+
+        if (!allow) {
+            GA_LOG("MetaX: skip gdrcopy BAR, 1B mcMemcpy flag fallback");
+            return alloc_cpu_flag_scratch(out);
+        }
+        GA_LOG("MetaX: PERFTEST_ALLOW_MACA_GDRAPI=1 -> try gdrcopy BAR map");
     }
     if (try_map_gpu_bar(out) == 0) {
         return 0;

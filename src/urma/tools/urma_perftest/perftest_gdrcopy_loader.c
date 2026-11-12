@@ -66,6 +66,13 @@ static int env_disabled(void)
     return (e != NULL && e[0] == '1' && e[1] == '\0');
 }
 
+static int env_allow_maca_gdrapi(void)
+{
+    const char *e = getenv("PERFTEST_ALLOW_MACA_GDRAPI");
+
+    return (e != NULL && e[0] == '1' && e[1] == '\0');
+}
+
 static int gdrapi_is_maca(void *lib, const char *hint)
 {
     struct link_map *map = NULL;
@@ -74,6 +81,18 @@ static int gdrapi_is_maca(void *lib, const char *hint)
     if (lib != NULL && dlinfo(lib, RTLD_DI_LINKMAP, &map) == 0 &&
         map != NULL && map->l_name != NULL && map->l_name[0] != '\0') {
         path = map->l_name;
+    }
+    /*
+     * MXGDA: MACA ships a libgdrapi that exports the same gdr_* ABI
+     * (gdr_open/gdr_pin_buffer/gdr_map/gdr_get_info_v2) plus an extra
+     * mcMemRemap symbol. The heuristic below rejects it, which forces
+     * perftest onto the mcMemcpy D2H fallback for every flag poll and
+     * inflates write-latency by ~13us. Set PERFTEST_ALLOW_MACA_GDRAPI=1
+     * to accept it instead and let the CPU map GPU memory directly.
+     * Default (unset) keeps the original behaviour.
+     */
+    if (env_allow_maca_gdrapi()) {
+        return 0;
     }
     if (path != NULL &&
         (strstr(path, "metax_lib") != NULL ||
@@ -85,10 +104,40 @@ static int gdrapi_is_maca(void *lib, const char *hint)
     return (lib != NULL && dlsym(lib, "mcMemRemap") != NULL);
 }
 
+/*
+ * MXGDA: MACA libgdrapi.so.2 calls mcMemRemap but does NOT declare
+ * libmcruntime in its DT_NEEDED, so the symbol is unresolved at first use and
+ * the process dies with "symbol lookup error: undefined symbol: mcMemRemap".
+ * Pre-loading libmcruntime with RTLD_GLOBAL makes the symbol available.
+ */
+static void preload_mc_runtime(void)
+{
+    static const char *const candidates[] = {
+        "/opt/maca/lib64/libmcruntime.so",
+        "/opt/maca/lib/libmcruntime.so",
+        "libmcruntime.so",
+        NULL,
+    };
+    int i;
+
+    if (!env_allow_maca_gdrapi()) {
+        return;
+    }
+    for (i = 0; candidates[i] != NULL; i++) {
+        void *h = dlopen(candidates[i], RTLD_NOW | RTLD_GLOBAL);
+        if (h != NULL) {
+            GDR_LOG("preloaded %s (mcMemRemap for MACA gdrapi)", candidates[i]);
+            return;
+        }
+    }
+    GDR_LOG("WARN: could not preload libmcruntime; MACA gdrapi will fail");
+}
+
 static void *dlopen_nvidia_gdrapi(const char *path, const char **opened_path)
 {
     void *lib;
 
+    preload_mc_runtime();
     (void)dlerror();
     lib = dlopen(path, RTLD_LAZY);
     if (lib == NULL) {
@@ -291,7 +340,17 @@ int perftest_gdrcopy_map(void *gpu_va, size_t size, void **out_map_raw,
         return -1;
     }
 
-    if (dptr < info.va || dptr + size > info.va + info.mapped_size) {
+    /*
+     * MXGDA: MACA's gdr_get_info_v2 does not fill the NVIDIA-style
+     * gdr_info_v2 layout. Raw dump of a real call shows only 16 bytes
+     * written: va at offset 0, page_size at offset 12, and no mapped_size
+     * field at all. The NVIDIA struct reads mapped_size from offset 8,
+     * which is always 0, so the bounds check below can never pass.
+     * Since gdr_map() already succeeded for exactly [dptr, dptr+size),
+     * skip that check when the MACA experiment is enabled.
+     */
+    if (!env_allow_maca_gdrapi() &&
+        (dptr < info.va || dptr + size > info.va + info.mapped_size)) {
         GDR_LOG("FAIL: dptr=%#llx size=%zu outside mapped [%#llx,+%#llx)",
                 (unsigned long long)dptr, size,
                 (unsigned long long)info.va,
