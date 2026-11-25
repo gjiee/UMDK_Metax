@@ -39,6 +39,14 @@ struct udma_u_jetty_opt_info {
 };
 
 urma_jetty_t *udma_u_create_jetty(urma_context_t *ctx, urma_jetty_cfg_t *cfg);
+
+/* MXGDA: create a jetty whose send queue lives in GPU HBM (device pointer
+ * from mcMalloc).  The jetty is otherwise identical to one returned by
+ * udma_u_create_jetty(), so RC bind and two-sided SEND/RECV work. */
+urma_jetty_t *udma_u_create_jetty_with_gpu_sq(urma_context_t *ctx,
+					      urma_jetty_cfg_t *cfg,
+					      void *gpu_sq_buff,
+					      uint32_t gpu_sq_size);
 urma_status_t udma_u_delete_jetty(urma_jetty_t *jetty);
 urma_status_t udma_u_delete_jetty_batch(urma_jetty_t **jetty, int jetty_cnt, urma_jetty_t **bad_jetty);
 urma_status_t udma_u_unimport_jetty(urma_target_jetty_t *target_jetty);

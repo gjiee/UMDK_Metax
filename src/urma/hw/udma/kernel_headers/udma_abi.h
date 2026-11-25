@@ -82,7 +82,8 @@ struct udma_create_jetty_ucmd {
 	__u32 non_pin : 1;
 	__u32 is_hugepage : 1;
 	__u32 dtu_en : 1;
-	__u32 rsv : 28;
+	__u32 is_gpu_seg : 1;	/* MXGDA: SQ buffer lives in GPU memory (GDR-style) */
+	__u32 rsv : 27;
 	__u32 jetty_type;
 	__aligned_u64 jfr_sleep_buf;
 	__u32 jfs_id;

@@ -389,6 +389,7 @@ static urma_jfs_t *udma_u_create_jfs_ex(urma_context_t *ctx,
 	}
 
 	jfs->sq.cstm = cfg_ex->cstm_cfg.flag.bs.sq_cstm;
+	jfs->sq.is_gpu = cfg_ex->cstm_cfg.flag.bs.sq_gpu != 0 ? true : false;
 	jfs->sq.pi_type = cfg_ex->pi_type;
 	jfs->jfs_type = (uint32_t)cfg_ex->jetty_type;
 	jfs->sq.db.id = cfg_ex->id;
@@ -518,6 +519,7 @@ static void udma_u_init_jetty_param_ex(struct udma_u_jetty *jetty,
 {
 	jetty->jfr = to_udma_u_jfr(cfg_ex->base_cfg.shared.jfr);
 	jetty->sq.cstm = cfg_ex->jfs_cstm.flag.bs.sq_cstm != 0 ? true : false;
+	jetty->sq.is_gpu = cfg_ex->jfs_cstm.flag.bs.sq_gpu != 0 ? true : false;
 	jetty->jetty_type = (uint32_t)cfg_ex->jetty_type;
 	jetty->sq.pi_type = cfg_ex->pi_type;
 	cfg_ex->base_cfg.jfs_cfg.depth = 1;
