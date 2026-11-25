@@ -124,7 +124,6 @@ static int udma_u_exec_jfs_active_cmd(struct udma_u_jfs *jfs, urma_jfs_cfg_t *cf
 	cmd.sqe_bb_cnt = jfs->sq.sqe_bb_cnt;
 	cmd.pi_type = jfs->sq.pi_type;
 	cmd.non_pin = jfs->sq.cstm;
-	cmd.is_gpu_seg = jfs->sq.is_gpu;
 	cmd.is_hugepage = jfs->sq.hugepage != NULL;
 	cmd.jetty_type = jfs->jfs_type;
 	cmd.jfs_id = jfs->sq.db.id;
@@ -164,7 +163,6 @@ int udma_u_exec_jfs_create_cmd(urma_context_t *ctx, struct udma_u_jfs *jfs,
 	cmd.sqe_bb_cnt = jfs->sq.sqe_bb_cnt;
 	cmd.pi_type = jfs->sq.pi_type;
 	cmd.non_pin = jfs->sq.cstm;
-	cmd.is_gpu_seg = jfs->sq.is_gpu;
 	cmd.is_hugepage = jfs->sq.hugepage != NULL;
 	cmd.jetty_type = jfs->jfs_type;
 	cmd.jfs_id = jfs->sq.db.id;

@@ -16,7 +16,6 @@
 #include "udma_u_jfc.h"
 #include "udma_u_buf.h"
 #include "udma_u_db.h"
-#include <stdatomic.h>
 #include "udma_u_jetty.h"
 
 static int exec_jetty_active_cmd(struct udma_u_jetty *jetty, urma_jetty_cfg_t *cfg)
@@ -40,7 +39,6 @@ static int exec_jetty_active_cmd(struct udma_u_jetty *jetty, urma_jetty_cfg_t *c
 	cmd.pi_type = jetty->sq.pi_type;
 	cmd.jetty_type = jetty->jetty_type;
 	cmd.non_pin = jetty->sq.cstm;
-	cmd.is_gpu_seg = jetty->sq.is_gpu;
 	cmd.is_hugepage = jetty->sq.hugepage != NULL;
 
 	udma_u_set_udata(&udata, &cmd, (uint32_t)sizeof(cmd), &resp, (uint32_t)sizeof(resp));
@@ -84,7 +82,6 @@ int exec_jetty_create_cmd(urma_context_t *ctx, struct udma_u_jetty *jetty,
 	cmd.pi_type = jetty->sq.pi_type;
 	cmd.jetty_type = jetty->jetty_type;
 	cmd.non_pin = jetty->sq.cstm;
-	cmd.is_gpu_seg = jetty->sq.is_gpu;
 	cmd.is_hugepage = jetty->sq.hugepage != NULL;
 	udma_u_set_udata(&udata, &cmd, (uint32_t)sizeof(cmd), &resp, (uint32_t)sizeof(resp));
 	ret = urma_cmd_create_jetty(ctx, &jetty->base, cfg, &udata);
@@ -1141,90 +1138,3 @@ urma_status_t udma_u_deactive_jetty(urma_jetty_t *jetty)
 
 	return URMA_SUCCESS;
 }
-
-/* MXGDA: create a full RC-capable jetty whose SQ lives in GPU HBM.
- *
- * Differs from udma_u_create_jetty() only in that the caller supplies the
- * SQ buffer (a device pointer from mcMalloc) instead of letting the library
- * allocate it from host memory.  Everything else -- jetty id allocation,
- * JFR/JFC wiring, doorbell setup -- follows the normal path, which means the
- * resulting jetty supports RC bind and therefore both one-sided (WRITE/READ)
- * and two-sided (SEND/RECV) semantics.
- *
- * The GPU pages are pinned and mapped by the kernel when it sees
- * ucmd.is_gpu_seg + ucmd.non_pin (see udma_alloc_u_sq_buf()).
- */
-urma_jetty_t *udma_u_create_jetty_with_gpu_sq(urma_context_t *ctx,
-					      urma_jetty_cfg_t *cfg,
-					      void *gpu_sq_buff,
-					      uint32_t gpu_sq_size)
-{
-	struct udma_u_context *udma_ctx = to_udma_u_ctx(ctx);
-	struct udma_u_jetty *jetty;
-	int ret;
-
-	if (gpu_sq_buff == NULL || gpu_sq_size < UDMA_HW_PAGE_SIZE)
-		return NULL;
-
-	jetty = (struct udma_u_jetty *)calloc(1, sizeof(struct udma_u_jetty));
-	if (jetty == NULL) {
-		UDMA_LOG_ERR("memory allocation failed.\n");
-		return NULL;
-	}
-
-	jetty->sq.ctx = udma_ctx;
-
-	/* Pre-seed the SQ so udma_u_create_sq() keeps our buffer: it skips the
-	 * host allocation entirely whenever cstm is set. */
-	jetty->sq.qbuf = gpu_sq_buff;
-	jetty->sq.qbuf_size = gpu_sq_size;
-	jetty->sq.cstm = true;
-	jetty->sq.is_gpu = true;
-
-	ret = udma_u_active_jetty_prepare(&jetty->base, cfg);
-	if (ret)
-		goto err_active_jetty_prepare;
-
-	jetty->jetty_type = UDMA_URMA_NORMAL_JETTY_TYPE;
-	if (exec_jetty_create_cmd(ctx, jetty, cfg)) {
-		UDMA_LOG_ERR("failed to create gpu-sq jetty.\n");
-		goto err_jetty_create_cmd;
-	}
-
-	jetty->sq.db.type = UDMA_MMAP_JETTY_DSQE;
-	if (udma_u_alloc_db(ctx, &jetty->sq.db))
-		goto err_alloc_db;
-
-	jetty->sq.dwqe_addr = (void *)jetty->sq.db.addr;
-	if (insert_jetty_node(udma_ctx, jetty))
-		goto err_insert_node;
-
-	/*
-	 * MXGDA-FIX-LEAK: 必须补这两步，否则 urma_delete_jetty() 会在
-	 *   if (jetty->urma_jetty_opt.is_actived == false) return URMA_EINVAL;
-	 * 处直接返回 22，jetty 及连带资源（JFC/JFR/jetty_id/ctx ref）全部泄漏，
-	 * 跑一轮就把 UB 控制器的 JFC 资源耗尽（failed to post create JFC mailbox）。
-	 *
-	 * urma_create_jetty()（lib/urma/core/urma_cp_api.c）在 ops->create_jetty()
-	 * 成功后做的是同样两件事，本路径绕过了它，所以必须在此补上。
-	 */
-	atomic_fetch_add(&ctx->ref.atomic_cnt, 1);
-	jetty->base.urma_jetty_opt.is_actived = true;
-
-	UDMA_LOG_INFO("gpu-sq jetty created id=%u qbuf=%p size=%u\n",
-		      jetty->base.jetty_id.id, gpu_sq_buff, gpu_sq_size);
-	return &jetty->base;
-
-err_insert_node:
-	udma_u_free_db(ctx, &jetty->sq.db);
-err_alloc_db:
-	(void)urma_cmd_delete_jetty(&jetty->base);
-err_jetty_create_cmd:
-	/* MXGDA-FIX-LEAK: 与标准路径一致，用 udma_u_delete_sq 而非
-	 * udma_u_free_queue_buf，后者跳过 pthread_spin_destroy。 */
-	udma_u_delete_sq(&jetty->sq);
-err_active_jetty_prepare:
-	free(jetty);
-	return NULL;
-}
-

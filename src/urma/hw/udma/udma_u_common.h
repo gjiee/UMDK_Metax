@@ -145,7 +145,6 @@ struct udma_u_jetty_queue {
 	bool lock_free;
 	bool cstm; /* sq ctrl flag */
 	bool sq_reserved;
-	bool is_gpu; /* MXGDA: SQ buffer lives in GPU HBM (cstm + GDR pin) */
 	struct udma_u_hugepage *hugepage;
 	uint8_t db_status;
 	bool need_ring_db;

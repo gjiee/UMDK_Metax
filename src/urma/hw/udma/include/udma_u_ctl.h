@@ -51,8 +51,7 @@ union udma_jfs_flag {
 		uint32_t sq_cstm : 1;
 		uint32_t db_cstm : 1;
 		uint32_t db_ctl_cstm : 1;
-		uint32_t sq_gpu : 1;	/* MXGDA: SQ buffer in GPU HBM */
-		uint32_t reserved : 28;
+		uint32_t reserved : 29;
 	} bs;
 	uint32_t value;
 };
